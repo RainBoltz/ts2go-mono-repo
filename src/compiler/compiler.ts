@@ -8,16 +8,19 @@ import { TypeScriptParser } from '../frontend/parser';
 import { IRTransformer } from '../ir/transformer';
 import { GoCodeGenerator } from '../backend/go-generator';
 import { CompilationResult, CompilationError } from './result';
+import { IROptimizer } from '../optimizer/optimizer';
 
 export class Compiler {
   private parser: TypeScriptParser;
   private transformer: IRTransformer;
   private generator: GoCodeGenerator;
+  private optimizer: IROptimizer;
 
   constructor(private options: CompilerOptions) {
     this.parser = new TypeScriptParser(options);
     this.transformer = new IRTransformer(options);
     this.generator = new GoCodeGenerator(options);
+    this.optimizer = new IROptimizer(options);
   }
 
   /**
@@ -35,12 +38,12 @@ export class Compiler {
       const optimizedIR = await this.optimizeIR(irModule);
 
       // 階段 4: 產生 Go 程式碼
-      const goCode = await this.generator.generate(optimizedIR);
+      const generated = this.generator.generate(optimizedIR);
 
       return {
         success: true,
-        output: goCode,
-        sourceMap: this.generator.getSourceMap(),
+        output: generated.code,
+        sourceMap: generated.sourceMap,
         warnings: this.collectWarnings(),
         statistics: this.collectStatistics()
       };
@@ -73,12 +76,11 @@ export class Compiler {
       const resolvedModules = await this.resolveModuleDependencies(modules);
 
       // 階段 4: 批次產生 Go 程式碼
-      const goProject = await this.generator.generateProject(resolvedModules);
+      const goFiles = resolvedModules.map(m => this.generator.generate(m));
 
       return {
         success: true,
-        output: goProject,
-        sourceMap: this.generator.getSourceMap(),
+        output: { files: goFiles },
         warnings: this.collectWarnings(),
         statistics: this.collectStatistics()
       };
@@ -95,12 +97,7 @@ export class Compiler {
    * IR 優化階段
    */
   private async optimizeIR(module: Module): Promise<Module> {
-    // TODO: 實作各種優化 pass
-    // - 死碼消除
-    // - 常數折疊
-    // - 型別簡化
-    // - 控制流正規化
-    return module;
+    return this.optimizer.optimize(module);
   }
 
   /**

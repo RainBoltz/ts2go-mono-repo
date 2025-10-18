@@ -1,0 +1,1088 @@
+/**
+ * Go Code Generator
+ * 將 IR 轉換為 Go 原始碼
+ */
+
+import * as ir from '../ir/nodes';
+import { CompilerOptions } from '../config/options';
+import { SourceMap } from './sourcemap';
+
+export interface GeneratedCode {
+  code: string;
+  sourceMap?: SourceMap;
+}
+
+export class GoCodeGenerator implements ir.IRVisitor<string> {
+  private indentLevel = 0;
+  private indentStr = '\t';
+  private options: CompilerOptions;
+  private sourceMap?: SourceMap;
+  private currentPackage = 'main';
+  private imports = new Set<string>();
+  private needsContext = false;
+  private needsRuntime = false;
+
+  constructor(options: CompilerOptions) {
+    this.options = options;
+    if (options.sourceMap) {
+      this.sourceMap = new SourceMap();
+    }
+  }
+
+  /**
+   * 產生 Go 程式碼
+   */
+  generate(module: ir.Module): GeneratedCode {
+    this.reset();
+    const code = this.visitModule(module);
+
+    return {
+      code,
+      sourceMap: this.sourceMap
+    };
+  }
+
+  private reset(): void {
+    this.indentLevel = 0;
+    this.imports.clear();
+    this.needsContext = false;
+    this.needsRuntime = false;
+  }
+
+  // ============= 輔助方法 =============
+
+  private indent(): string {
+    return this.indentStr.repeat(this.indentLevel);
+  }
+
+  private increaseIndent(): void {
+    this.indentLevel++;
+  }
+
+  private decreaseIndent(): void {
+    this.indentLevel = Math.max(0, this.indentLevel - 1);
+  }
+
+  private addImport(pkg: string): void {
+    this.imports.add(pkg);
+  }
+
+  private generateImports(): string {
+    if (this.imports.size === 0) return '';
+
+    const importList = Array.from(this.imports).sort();
+    if (importList.length === 1) {
+      return `import "${importList[0]}"\n\n`;
+    }
+
+    return 'import (\n' +
+      importList.map(pkg => `\t"${pkg}"`).join('\n') +
+      '\n)\n\n';
+  }
+
+  private capitalize(str: string): string {
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+
+  private isExported(name: string): boolean {
+    return name.charAt(0) === name.charAt(0).toUpperCase();
+  }
+
+  private exportName(name: string, forceExport: boolean = false): string {
+    if (forceExport || this.hasModifier([], 'export')) {
+      return this.capitalize(name);
+    }
+    return name;
+  }
+
+  private hasModifier(modifiers: ir.Modifier[], kind: string): boolean {
+    return modifiers.some(m => m.kind === kind);
+  }
+
+  // ============= Module =============
+
+  visitModule(node: ir.Module): string {
+    let result = `// Generated from: ${node.name}\n\n`;
+    result += `package ${this.currentPackage}\n\n`;
+
+    // 收集所有宣告，確定需要的 imports
+    const declarations: string[] = [];
+    for (const stmt of node.statements) {
+      if (stmt instanceof ir.Declaration) {
+        declarations.push(stmt.accept(this));
+      } else {
+        declarations.push(stmt.accept(this));
+      }
+    }
+
+    // 產生 imports
+    result += this.generateImports();
+
+    // 產生宣告
+    result += declarations.join('\n\n');
+
+    return result;
+  }
+
+  visitImportDeclaration(node: ir.ImportDeclaration): string {
+    // Go 的 import 處理在 module 層級
+    return '';
+  }
+
+  visitImportSpecifier(node: ir.ImportSpecifier): string {
+    return '';
+  }
+
+  visitExportDeclaration(node: ir.ExportDeclaration): string {
+    if (node.declaration) {
+      return node.declaration.accept(this);
+    }
+    return '';
+  }
+
+  visitExportSpecifier(node: ir.ExportSpecifier): string {
+    return '';
+  }
+
+  // ============= Types =============
+
+  visitPrimitiveType(node: ir.PrimitiveType): string {
+    switch (node.kind) {
+      case 'number':
+        return this.options.numberStrategy === 'int' ? 'int' : 'float64';
+      case 'string':
+        return 'string';
+      case 'boolean':
+        return 'bool';
+      case 'void':
+        return ''; // void 不返回值
+      case 'any':
+      case 'unknown':
+        return 'interface{}';
+      case 'never':
+        return ''; // never 類型在 Go 中無對應
+      default:
+        return 'interface{}';
+    }
+  }
+
+  visitArrayType(node: ir.ArrayType): string {
+    const elementType = node.elementType.accept(this);
+    return `[]${elementType}`;
+  }
+
+  visitTupleType(node: ir.TupleType): string {
+    // Tuple 轉換為 struct
+    const fields = node.elements.map((type, idx) => {
+      return `${this.indent()}\tItem${idx} ${type.accept(this)}`;
+    }).join('\n');
+
+    return `struct {\n${fields}\n${this.indent()}}`;
+  }
+
+  visitObjectType(node: ir.ObjectType): string {
+    const fields = node.properties.map(prop => {
+      const typeName = prop.type.accept(this);
+      const fieldName = this.capitalize(prop.name);
+      const fieldType = prop.optional ? `*${typeName}` : typeName;
+      return `${this.indent()}\t${fieldName} ${fieldType}`;
+    }).join('\n');
+
+    return `struct {\n${fields}\n${this.indent()}}`;
+  }
+
+  visitFunctionType(node: ir.FunctionType): string {
+    const params = node.parameters.map(p => p.type?.accept(this) || 'interface{}').join(', ');
+    const returnType = node.returnType.accept(this);
+
+    if (node.isAsync) {
+      this.needsContext = true;
+      this.addImport('context');
+      return `func(context.Context, ${params}) (${returnType}, error)`;
+    }
+
+    return `func(${params}) ${returnType}`;
+  }
+
+  visitUnionType(node: ir.UnionType): string {
+    switch (this.options.unionStrategy) {
+      case 'interface':
+        // Interface-based union
+        return 'interface{}'; // 需要在外層產生實際的 interface 定義
+
+      case 'any':
+        return 'interface{}';
+
+      case 'tagged':
+      default:
+        // Tagged union - 需要在外層產生 struct
+        return 'interface{}'; // placeholder
+    }
+  }
+
+  visitIntersectionType(node: ir.IntersectionType): string {
+    // Intersection 通過 struct embedding 實現
+    // 這裡返回 placeholder，實際實現在 TypeAliasDeclaration
+    return 'interface{}';
+  }
+
+  visitTypeReference(node: ir.TypeReference): string {
+    let typeName = node.name;
+
+    // 處理泛型參數
+    if (node.typeArguments && node.typeArguments.length > 0) {
+      const typeArgs = node.typeArguments.map(t => t.accept(this)).join(', ');
+      return `${typeName}[${typeArgs}]`;
+    }
+
+    return typeName;
+  }
+
+  visitLiteralType(node: ir.LiteralType): string {
+    // Literal types 通常映射為對應的基本型別
+    if (typeof node.value === 'string') return 'string';
+    if (typeof node.value === 'number') return this.options.numberStrategy === 'int' ? 'int' : 'float64';
+    if (typeof node.value === 'boolean') return 'bool';
+    return 'interface{}';
+  }
+
+  visitPropertySignature(node: ir.PropertySignature): string {
+    const fieldName = this.capitalize(node.name);
+    const typeName = node.type.accept(this);
+    const fieldType = node.optional ? `*${typeName}` : typeName;
+
+    let result = `${fieldName} ${fieldType}`;
+
+    // 添加 json tag
+    result += ` \`json:"${node.name}`;
+    if (node.optional) {
+      result += ',omitempty';
+    }
+    result += '"\`';
+
+    return result;
+  }
+
+  visitIndexSignature(node: ir.IndexSignature): string {
+    const keyType = node.keyType.accept(this);
+    const valueType = node.valueType.accept(this);
+    return `map[${keyType}]${valueType}`;
+  }
+
+  // ============= Declarations =============
+
+  visitVariableDeclaration(node: ir.VariableDeclaration): string {
+    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+    const isConst = node.isConst || this.hasModifier(node.modifiers, 'export');
+
+    if (node.initializer && !node.type) {
+      // 型別推斷
+      const init = node.initializer.accept(this);
+      return `${isConst ? 'const' : 'var'} ${name} = ${init}`;
+    }
+
+    if (node.type) {
+      const typeName = node.type.accept(this);
+      if (node.initializer) {
+        const init = node.initializer.accept(this);
+        return `var ${name} ${typeName} = ${init}`;
+      }
+      return `var ${name} ${typeName}`;
+    }
+
+    return `var ${name} interface{}`;
+  }
+
+  visitFunctionDeclaration(node: ir.FunctionDeclaration): string {
+    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+    const isAsync = this.hasModifier(node.modifiers, 'async');
+
+    // 型別參數（泛型）
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => {
+        const constraint = tp.constraint ? ` ${tp.constraint.accept(this)}` : ' any';
+        return tp.name + constraint;
+      }).join(', ') + ']';
+    }
+
+    // 參數
+    let params = node.parameters.map(p => this.visitParameter(p)).join(', ');
+    if (isAsync) {
+      this.needsContext = true;
+      this.addImport('context');
+      params = `ctx context.Context` + (params ? ', ' + params : '');
+    }
+
+    // 返回型別
+    let returnType = '';
+    if (node.returnType && node.returnType.accept(this)) {
+      returnType = node.returnType.accept(this);
+      if (isAsync) {
+        returnType = `(${returnType}, error)`;
+      }
+    } else if (isAsync) {
+      returnType = 'error';
+    }
+
+    // 函式簽名
+    let signature = `func ${name}${typeParams}(${params})`;
+    if (returnType) {
+      signature += ` ${returnType}`;
+    }
+
+    // 函式體
+    if (node.body) {
+      const body = this.visitBlockStatement(node.body);
+      return `${signature} ${body}`;
+    }
+
+    return signature;
+  }
+
+  visitParameter(node: ir.Parameter): string {
+    let type = node.type?.accept(this) || 'interface{}';
+
+    // 可選參數使用指標
+    if (node.optional && this.options.nullabilityStrategy === 'pointer') {
+      type = `*${type}`;
+    }
+
+    // Rest 參數
+    if (node.rest) {
+      type = `...${type}`;
+    }
+
+    return `${node.name} ${type}`;
+  }
+
+  visitTypeParameter(node: ir.TypeParameter): string {
+    let result = node.name;
+    if (node.constraint) {
+      result += ` ${node.constraint.accept(this)}`;
+    } else {
+      result += ' any';
+    }
+    return result;
+  }
+
+  visitClassDeclaration(node: ir.ClassDeclaration): string {
+    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+    let result = '';
+
+    // 型別參數
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
+    }
+
+    // Struct 定義
+    result += `type ${name}${typeParams} struct {\n`;
+
+    // Embedding (extends/implements)
+    if (node.extends) {
+      this.increaseIndent();
+      result += `${this.indent()}${node.extends.accept(this)}\n`;
+      this.decreaseIndent();
+    }
+    if (node.implements) {
+      for (const iface of node.implements) {
+        this.increaseIndent();
+        result += `${this.indent()}${iface.accept(this)}\n`;
+        this.decreaseIndent();
+      }
+    }
+
+    // 屬性
+    this.increaseIndent();
+    for (const member of node.members) {
+      if (member instanceof ir.PropertyMember) {
+        const isPrivate = this.hasModifier(member.modifiers, 'private');
+        const fieldName = isPrivate ? member.name : this.capitalize(member.name);
+        const typeName = member.type?.accept(this) || 'interface{}';
+        result += `${this.indent()}${fieldName} ${typeName}\n`;
+      }
+    }
+    this.decreaseIndent();
+
+    result += '}\n\n';
+
+    // Constructor
+    const constructor = this.generateConstructor(name, node);
+    if (constructor) {
+      result += constructor + '\n\n';
+    }
+
+    // 方法
+    for (const member of node.members) {
+      if (member instanceof ir.MethodMember) {
+        result += this.generateMethod(name, member) + '\n\n';
+      }
+    }
+
+    return result.trim();
+  }
+
+  private generateConstructor(className: string, node: ir.ClassDeclaration): string {
+    const properties = node.members.filter(m => m instanceof ir.PropertyMember) as ir.PropertyMember[];
+    if (properties.length === 0) return '';
+
+    const params = properties
+      .filter(p => !p.initializer)
+      .map(p => {
+        const isPrivate = this.hasModifier(p.modifiers, 'private');
+        const paramName = isPrivate ? p.name : p.name.toLowerCase();
+        const typeName = p.type?.accept(this) || 'interface{}';
+        return `${paramName} ${typeName}`;
+      })
+      .join(', ');
+
+    let result = `func New${className}(${params}) *${className} {\n`;
+    result += `${this.indent()}\treturn &${className}{\n`;
+
+    for (const prop of properties) {
+      const isPrivate = this.hasModifier(prop.modifiers, 'private');
+      const fieldName = isPrivate ? prop.name : this.capitalize(prop.name);
+      const paramName = isPrivate ? prop.name : prop.name.toLowerCase();
+
+      if (prop.initializer) {
+        this.increaseIndent();
+        this.increaseIndent();
+        result += `${this.indent()}${fieldName}: ${prop.initializer.accept(this)},\n`;
+        this.decreaseIndent();
+        this.decreaseIndent();
+      } else {
+        this.increaseIndent();
+        this.increaseIndent();
+        result += `${this.indent()}${fieldName}: ${paramName},\n`;
+        this.decreaseIndent();
+        this.decreaseIndent();
+      }
+    }
+
+    result += `${this.indent()}\t}\n`;
+    result += `${this.indent()}}`;
+
+    return result;
+  }
+
+  private generateMethod(className: string, node: ir.MethodMember): string {
+    const isStatic = this.hasModifier(node.modifiers, 'static');
+    const isAsync = this.hasModifier(node.modifiers, 'async');
+    const methodName = this.exportName(node.name, !this.hasModifier(node.modifiers, 'private'));
+
+    // 接收者
+    let receiver = '';
+    if (!isStatic) {
+      const receiverName = className.charAt(0).toLowerCase();
+      const receiverType = this.options.usePointerReceivers ? `*${className}` : className;
+      receiver = `(${receiverName} ${receiverType}) `;
+    }
+
+    // 型別參數
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
+    }
+
+    // 參數
+    let params = node.parameters.map(p => this.visitParameter(p)).join(', ');
+    if (isAsync) {
+      this.needsContext = true;
+      this.addImport('context');
+      params = `ctx context.Context` + (params ? ', ' + params : '');
+    }
+
+    // 返回型別
+    let returnType = '';
+    if (node.returnType && node.returnType.accept(this)) {
+      returnType = node.returnType.accept(this);
+      if (isAsync) {
+        returnType = `(${returnType}, error)`;
+      }
+    } else if (isAsync) {
+      returnType = 'error';
+    }
+
+    // 方法簽名
+    let signature = `func ${receiver}${methodName}${typeParams}(${params})`;
+    if (returnType) {
+      signature += ` ${returnType}`;
+    }
+
+    // 方法體
+    if (node.body) {
+      const body = this.visitBlockStatement(node.body);
+      return `${signature} ${body}`;
+    }
+
+    return signature;
+  }
+
+  visitPropertyMember(node: ir.PropertyMember): string {
+    const fieldName = this.capitalize(node.name);
+    const typeName = node.type?.accept(this) || 'interface{}';
+    return `${fieldName} ${typeName}`;
+  }
+
+  visitMethodMember(node: ir.MethodMember): string {
+    // 方法在 class 層級處理
+    return '';
+  }
+
+  visitInterfaceDeclaration(node: ir.InterfaceDeclaration): string {
+    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+
+    // 型別參數
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
+    }
+
+    let result = `type ${name}${typeParams} interface {\n`;
+
+    // Embedding
+    if (node.extends) {
+      this.increaseIndent();
+      for (const ext of node.extends) {
+        result += `${this.indent()}${ext.accept(this)}\n`;
+      }
+      this.decreaseIndent();
+    }
+
+    // 方法簽名
+    this.increaseIndent();
+    for (const member of node.members) {
+      const methodName = this.capitalize(member.name);
+      const typeName = member.type.accept(this);
+
+      // 如果是 function type，展開為方法簽名
+      if (member.type instanceof ir.FunctionType) {
+        const funcType = member.type;
+        const params = funcType.parameters.map(p => this.visitParameter(p)).join(', ');
+        const returnType = funcType.returnType.accept(this);
+        result += `${this.indent()}${methodName}(${params}) ${returnType}\n`;
+      } else {
+        // Getter 方法
+        result += `${this.indent()}${methodName}() ${typeName}\n`;
+      }
+    }
+    this.decreaseIndent();
+
+    result += '}';
+
+    return result;
+  }
+
+  visitTypeAliasDeclaration(node: ir.TypeAliasDeclaration): string {
+    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+
+    // 型別參數
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
+    }
+
+    // 特殊處理 Union 和 Intersection
+    if (node.type instanceof ir.UnionType) {
+      return this.generateUnionType(name, node.type, typeParams);
+    }
+
+    if (node.type instanceof ir.IntersectionType) {
+      return this.generateIntersectionType(name, node.type, typeParams);
+    }
+
+    const typeName = node.type.accept(this);
+    return `type ${name}${typeParams} ${typeName}`;
+  }
+
+  private generateUnionType(name: string, union: ir.UnionType, typeParams: string): string {
+    switch (this.options.unionStrategy) {
+      case 'interface':
+        // Interface-based discriminated union
+        let result = `type ${name}${typeParams} interface {\n`;
+        result += `\tis${name}()\n`;
+        result += '}\n\n';
+
+        // Generate concrete types
+        for (let i = 0; i < union.types.length; i++) {
+          const typeName = union.types[i].accept(this);
+          const variantName = `${name}Variant${i}`;
+          result += `type ${variantName} struct { Value ${typeName} }\n`;
+          result += `func (${variantName}) is${name}() {}\n\n`;
+        }
+
+        return result.trim();
+
+      case 'any':
+        return `type ${name}${typeParams} interface{}`;
+
+      case 'tagged':
+      default:
+        // Tagged union
+        let taggedResult = `type ${name}${typeParams} struct {\n`;
+        taggedResult += '\ttag int\n';
+
+        for (let i = 0; i < union.types.length; i++) {
+          const typeName = union.types[i].accept(this);
+          taggedResult += `\tvalue${i} *${typeName}\n`;
+        }
+
+        taggedResult += '}\n\n';
+
+        // Helper methods
+        for (let i = 0; i < union.types.length; i++) {
+          const typeName = union.types[i].accept(this);
+          taggedResult += `func (u ${name}) IsType${i}() bool { return u.tag == ${i} }\n`;
+          taggedResult += `func (u ${name}) AsType${i}() ${typeName} {\n`;
+          taggedResult += `\tif u.value${i} != nil { return *u.value${i} }\n`;
+          taggedResult += `\tvar zero ${typeName}\n`;
+          taggedResult += `\treturn zero\n`;
+          taggedResult += '}\n\n';
+        }
+
+        return taggedResult.trim();
+    }
+  }
+
+  private generateIntersectionType(name: string, intersection: ir.IntersectionType, typeParams: string): string {
+    // Intersection 通過 struct embedding 實現
+    let result = `type ${name}${typeParams} struct {\n`;
+
+    this.increaseIndent();
+    for (const type of intersection.types) {
+      const typeName = type.accept(this);
+      result += `${this.indent()}${typeName}\n`;
+    }
+    this.decreaseIndent();
+
+    result += '}';
+
+    return result;
+  }
+
+  visitEnumDeclaration(node: ir.EnumDeclaration): string {
+    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+
+    // 判斷是字串 enum 還是數字 enum
+    const isStringEnum = node.members.some(m =>
+      m.value instanceof ir.Literal && typeof (m.value as ir.Literal).value === 'string'
+    );
+
+    let result = '';
+
+    if (isStringEnum) {
+      // String enum
+      result += `type ${name} string\n\n`;
+      result += 'const (\n';
+
+      this.increaseIndent();
+      for (const member of node.members) {
+        const memberName = `${name}${this.capitalize(member.name)}`;
+        const value = member.value ? member.value.accept(this) : `"${member.name}"`;
+        result += `${this.indent()}${memberName} ${name} = ${value}\n`;
+      }
+      this.decreaseIndent();
+
+      result += ')';
+    } else {
+      // Numeric enum
+      result += `type ${name} int\n\n`;
+      result += 'const (\n';
+
+      this.increaseIndent();
+      for (let i = 0; i < node.members.length; i++) {
+        const member = node.members[i];
+        const memberName = `${name}${this.capitalize(member.name)}`;
+
+        if (i === 0) {
+          if (member.value) {
+            result += `${this.indent()}${memberName} ${name} = ${member.value.accept(this)}\n`;
+          } else {
+            result += `${this.indent()}${memberName} ${name} = iota\n`;
+          }
+        } else {
+          if (member.value) {
+            result += `${this.indent()}${memberName} ${name} = ${member.value.accept(this)}\n`;
+          } else {
+            result += `${this.indent()}${memberName}\n`;
+          }
+        }
+      }
+      this.decreaseIndent();
+
+      result += ')';
+    }
+
+    return result;
+  }
+
+  visitEnumMember(node: ir.EnumMember): string {
+    return node.name;
+  }
+
+  // ============= Statements =============
+
+  visitBlockStatement(node: ir.BlockStatement): string {
+    let result = '{\n';
+
+    this.increaseIndent();
+    for (const stmt of node.statements) {
+      const stmtCode = stmt.accept(this);
+      if (stmtCode) {
+        result += `${this.indent()}${stmtCode}\n`;
+      }
+    }
+    this.decreaseIndent();
+
+    result += `${this.indent()}}`;
+
+    return result;
+  }
+
+  visitExpressionStatement(node: ir.ExpressionStatement): string {
+    return node.expression.accept(this);
+  }
+
+  visitReturnStatement(node: ir.ReturnStatement): string {
+    if (node.argument) {
+      return `return ${node.argument.accept(this)}`;
+    }
+    return 'return';
+  }
+
+  visitIfStatement(node: ir.IfStatement): string {
+    let result = `if ${node.test.accept(this)} ${node.consequent.accept(this)}`;
+
+    if (node.alternate) {
+      if (node.alternate instanceof ir.IfStatement) {
+        result += ` else ${node.alternate.accept(this)}`;
+      } else {
+        result += ` else ${node.alternate.accept(this)}`;
+      }
+    }
+
+    return result;
+  }
+
+  visitWhileStatement(node: ir.WhileStatement): string {
+    return `for ${node.test.accept(this)} ${node.body.accept(this)}`;
+  }
+
+  visitForStatement(node: ir.ForStatement): string {
+    let init = node.init ? (node.init instanceof ir.Expression ?
+      node.init.accept(this) :
+      node.init.accept(this).replace(/^var /, '').replace(/^const /, '')) : '';
+    let test = node.test ? node.test.accept(this) : '';
+    let update = node.update ? node.update.accept(this) : '';
+
+    return `for ${init}; ${test}; ${update} ${node.body.accept(this)}`;
+  }
+
+  visitForOfStatement(node: ir.ForOfStatement): string {
+    const varName = node.left.name;
+    const collection = node.right.accept(this);
+
+    return `for _, ${varName} := range ${collection} ${node.body.accept(this)}`;
+  }
+
+  visitTryStatement(node: ir.TryStatement): string {
+    // Try/catch 轉換為 error handling
+    let result = '';
+
+    if (this.options.errorHandling === 'panic') {
+      // 使用 panic/recover
+      result += 'func() {\n';
+      this.increaseIndent();
+
+      if (node.finalizer) {
+        result += `${this.indent()}defer func() ${this.visitBlockStatement(node.finalizer)}\n`;
+      }
+
+      if (node.handler) {
+        result += `${this.indent()}defer func() {\n`;
+        this.increaseIndent();
+        result += `${this.indent()}if r := recover(); r != nil {\n`;
+        this.increaseIndent();
+
+        if (node.handler.param) {
+          result += `${this.indent()}${node.handler.param.name} := r\n`;
+        }
+
+        const handlerBody = this.visitBlockStatement(node.handler.body);
+        result += `${this.indent()}${handlerBody}\n`;
+
+        this.decreaseIndent();
+        result += `${this.indent()}}\n`;
+        this.decreaseIndent();
+        result += `${this.indent()}}()\n`;
+      }
+
+      result += this.visitBlockStatement(node.block);
+      this.decreaseIndent();
+      result += '\n}()';
+    } else {
+      // 使用 error return
+      result += '// TODO: Convert try/catch to error handling\n';
+      result += this.visitBlockStatement(node.block);
+    }
+
+    return result;
+  }
+
+  visitCatchClause(node: ir.CatchClause): string {
+    return this.visitBlockStatement(node.body);
+  }
+
+  visitThrowStatement(node: ir.ThrowStatement): string {
+    if (this.options.errorHandling === 'panic') {
+      return `panic(${node.argument.accept(this)})`;
+    } else {
+      return `return ${node.argument.accept(this)}`;
+    }
+  }
+
+  visitSwitchStatement(node: ir.SwitchStatement): string {
+    let result = `switch ${node.discriminant.accept(this)} {\n`;
+
+    this.increaseIndent();
+    for (const caseNode of node.cases) {
+      result += this.visitSwitchCase(caseNode);
+    }
+    this.decreaseIndent();
+
+    result += `${this.indent()}}`;
+
+    return result;
+  }
+
+  visitSwitchCase(node: ir.SwitchCase): string {
+    let result = '';
+
+    if (node.test) {
+      result += `${this.indent()}case ${node.test.accept(this)}:\n`;
+    } else {
+      result += `${this.indent()}default:\n`;
+    }
+
+    this.increaseIndent();
+    for (const stmt of node.consequent) {
+      result += `${this.indent()}${stmt.accept(this)}\n`;
+    }
+    this.decreaseIndent();
+
+    return result;
+  }
+
+  // ============= Expressions =============
+
+  visitIdentifier(node: ir.Identifier): string {
+    return node.name;
+  }
+
+  visitLiteral(node: ir.Literal): string {
+    if (node.value === null) {
+      return 'nil';
+    }
+    if (node.value === undefined) {
+      return 'nil';
+    }
+    if (typeof node.value === 'string') {
+      return `"${node.value}"`;
+    }
+    return String(node.value);
+  }
+
+  visitArrayExpression(node: ir.ArrayExpression): string {
+    const elements = node.elements
+      .map(e => e ? e.accept(this) : 'nil')
+      .join(', ');
+
+    // 嘗試推斷型別
+    const elementType = node.inferredType instanceof ir.ArrayType ?
+      node.inferredType.elementType.accept(this) :
+      'interface{}';
+
+    return `[]${elementType}{${elements}}`;
+  }
+
+  visitObjectExpression(node: ir.ObjectExpression): string {
+    const props = node.properties.map(p => this.visitProperty(p)).join(', ');
+
+    // 物件字面量轉為 map
+    return `map[string]interface{}{${props}}`;
+  }
+
+  visitProperty(node: ir.Property): string {
+    const key = node.key instanceof ir.Identifier ?
+      `"${node.key.name}"` :
+      node.key.accept(this);
+    const value = node.value.accept(this);
+
+    return `${key}: ${value}`;
+  }
+
+  visitFunctionExpression(node: ir.FunctionExpression): string {
+    const params = node.parameters.map(p => this.visitParameter(p)).join(', ');
+    const returnType = node.returnType ? node.returnType.accept(this) : '';
+    const body = this.visitBlockStatement(node.body);
+
+    let signature = `func(${params})`;
+    if (returnType) {
+      signature += ` ${returnType}`;
+    }
+
+    return `${signature} ${body}`;
+  }
+
+  visitArrowFunctionExpression(node: ir.ArrowFunctionExpression): string {
+    const params = node.parameters.map(p => this.visitParameter(p)).join(', ');
+    const returnType = node.returnType ? node.returnType.accept(this) : '';
+
+    let signature = `func(${params})`;
+    if (returnType) {
+      signature += ` ${returnType}`;
+    }
+
+    if (node.body instanceof ir.BlockStatement) {
+      return `${signature} ${this.visitBlockStatement(node.body)}`;
+    } else {
+      // Expression body
+      return `${signature} { return ${node.body.accept(this)} }`;
+    }
+  }
+
+  visitCallExpression(node: ir.CallExpression): string {
+    const callee = node.callee.accept(this);
+    const args = node.arguments.map(arg => arg.accept(this)).join(', ');
+
+    // 型別參數
+    let typeArgs = '';
+    if (node.typeArguments && node.typeArguments.length > 0) {
+      typeArgs = '[' + node.typeArguments.map(t => t.accept(this)).join(', ') + ']';
+    }
+
+    return `${callee}${typeArgs}(${args})`;
+  }
+
+  visitMemberExpression(node: ir.MemberExpression): string {
+    const object = node.object.accept(this);
+
+    if (node.computed) {
+      const property = node.property.accept(this);
+      return `${object}[${property}]`;
+    } else {
+      const property = node.property instanceof ir.Identifier ?
+        this.capitalize(node.property.name) :
+        node.property.accept(this);
+
+      // Optional chaining
+      if (node.optional) {
+        this.needsRuntime = true;
+        // TODO: Generate runtime helper
+        return `${object}.${property}`;
+      }
+
+      return `${object}.${property}`;
+    }
+  }
+
+  visitNewExpression(node: ir.NewExpression): string {
+    const callee = node.callee.accept(this);
+    const args = node.arguments.map(arg => arg.accept(this)).join(', ');
+
+    // TypeScript's new → Go's constructor function
+    return `New${callee}(${args})`;
+  }
+
+  visitBinaryExpression(node: ir.BinaryExpression): string {
+    const left = node.left.accept(this);
+    const right = node.right.accept(this);
+
+    // 特殊運算子轉換
+    switch (node.operator) {
+      case '===':
+      case '==':
+        return `${left} == ${right}`;
+      case '!==':
+      case '!=':
+        return `${left} != ${right}`;
+      case '??':
+        // Nullish coalescing
+        return `func() interface{} { if ${left} != nil { return ${left} }; return ${right} }()`;
+      default:
+        return `${left} ${node.operator} ${right}`;
+    }
+  }
+
+  visitUnaryExpression(node: ir.UnaryExpression): string {
+    const arg = node.argument.accept(this);
+
+    switch (node.operator) {
+      case 'typeof':
+        this.addImport('reflect');
+        return `reflect.TypeOf(${arg}).String()`;
+      case 'void':
+        return `func() interface{} { ${arg}; return nil }()`;
+      case 'delete':
+        // delete 在 Go 中用於 map
+        return `delete(/* map */, ${arg})`;
+      default:
+        if (node.prefix) {
+          return `${node.operator}${arg}`;
+        } else {
+          return `${arg}${node.operator}`;
+        }
+    }
+  }
+
+  visitAssignmentExpression(node: ir.AssignmentExpression): string {
+    const left = node.left.accept(this);
+    const right = node.right.accept(this);
+
+    return `${left} ${node.operator} ${right}`;
+  }
+
+  visitConditionalExpression(node: ir.ConditionalExpression): string {
+    const test = node.test.accept(this);
+    const consequent = node.consequent.accept(this);
+    const alternate = node.alternate.accept(this);
+
+    // Go 沒有三元運算子，使用 IIFE
+    return `func() interface{} { if ${test} { return ${consequent} }; return ${alternate} }()`;
+  }
+
+  visitAwaitExpression(node: ir.AwaitExpression): string {
+    // await 轉換為同步呼叫 + error check
+    const arg = node.argument.accept(this);
+
+    // 假設 await 的表達式返回 (value, error)
+    return arg; // 呼叫方處理 error
+  }
+
+  visitSpreadElement(node: ir.SpreadElement): string {
+    return `${node.argument.accept(this)}...`;
+  }
+
+  visitTemplateLiteral(node: ir.TemplateLiteral): string {
+    this.addImport('fmt');
+
+    // 構建 fmt.Sprintf 格式字串
+    let format = '';
+    const args: string[] = [];
+
+    for (let i = 0; i < node.quasis.length; i++) {
+      format += node.quasis[i];
+      if (i < node.expressions.length) {
+        format += '%v';
+        args.push(node.expressions[i].accept(this));
+      }
+    }
+
+    if (args.length === 0) {
+      return `"${format}"`;
+    }
+
+    return `fmt.Sprintf("${format}", ${args.join(', ')})`;
+  }
+}

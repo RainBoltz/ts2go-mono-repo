@@ -1,0 +1,460 @@
+// Package ts2go_runtime provides runtime helpers for TypeScript to Go transpiled code
+package ts2go_runtime
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+)
+
+// ============= Optional Chaining Helpers =============
+
+// OptionalValue represents an optional value (TypeScript's T | undefined)
+type OptionalValue[T any] struct {
+	value   T
+	present bool
+}
+
+// NewOptional creates a new optional value with a value
+func NewOptional[T any](value T) OptionalValue[T] {
+	return OptionalValue[T]{value: value, present: true}
+}
+
+// NewEmptyOptional creates a new empty optional value
+func NewEmptyOptional[T any]() OptionalValue[T] {
+	var zero T
+	return OptionalValue[T]{value: zero, present: false}
+}
+
+// IsPresent returns true if the optional has a value
+func (o OptionalValue[T]) IsPresent() bool {
+	return o.present
+}
+
+// Get returns the value if present, otherwise returns zero value and false
+func (o OptionalValue[T]) Get() (T, bool) {
+	return o.value, o.present
+}
+
+// GetOrDefault returns the value if present, otherwise returns the default value
+func (o OptionalValue[T]) GetOrDefault(defaultValue T) T {
+	if o.present {
+		return o.value
+	}
+	return defaultValue
+}
+
+// Map applies a function to the value if present
+func (o OptionalValue[T]) Map[U any](fn func(T) U) OptionalValue[U] {
+	if o.present {
+		return NewOptional(fn(o.value))
+	}
+	return NewEmptyOptional[U]()
+}
+
+// FlatMap applies a function that returns an Optional to the value if present
+func (o OptionalValue[T]) FlatMap[U any](fn func(T) OptionalValue[U]) OptionalValue[U] {
+	if o.present {
+		return fn(o.value)
+	}
+	return NewEmptyOptional[U]()
+}
+
+// OptionalChain performs optional chaining (a?.b?.c)
+func OptionalChain[T any](getter func() (T, error)) OptionalValue[T] {
+	value, err := getter()
+	if err != nil {
+		return NewEmptyOptional[T]()
+	}
+	return NewOptional(value)
+}
+
+// SafeProperty safely accesses a property of a struct
+func SafeProperty[T any, U any](obj *T, accessor func(*T) U) OptionalValue[U] {
+	if obj == nil {
+		return NewEmptyOptional[U]()
+	}
+	return NewOptional(accessor(obj))
+}
+
+// ============= Union Type Helpers =============
+
+// Union represents a union type (TypeScript's A | B | C)
+type Union interface {
+	IsType(typeIndex int) bool
+	GetType() int
+	GetValue() interface{}
+}
+
+// Union2 represents a union of 2 types
+type Union2[A any, B any] struct {
+	tag    int
+	valueA *A
+	valueB *B
+}
+
+// NewUnion2A creates a Union2 with type A
+func NewUnion2A[A any, B any](value A) Union2[A, B] {
+	return Union2[A, B]{tag: 0, valueA: &value, valueB: nil}
+}
+
+// NewUnion2B creates a Union2 with type B
+func NewUnion2B[A any, B any](value B) Union2[A, B] {
+	return Union2[A, B]{tag: 1, valueA: nil, valueB: &value}
+}
+
+// IsType returns true if the union contains the specified type
+func (u Union2[A, B]) IsType(typeIndex int) bool {
+	return u.tag == typeIndex
+}
+
+// GetType returns the type index
+func (u Union2[A, B]) GetType() int {
+	return u.tag
+}
+
+// GetValue returns the value as interface{}
+func (u Union2[A, B]) GetValue() interface{} {
+	switch u.tag {
+	case 0:
+		return *u.valueA
+	case 1:
+		return *u.valueB
+	default:
+		return nil
+	}
+}
+
+// AsA returns the value as type A (panics if wrong type)
+func (u Union2[A, B]) AsA() A {
+	if u.tag == 0 && u.valueA != nil {
+		return *u.valueA
+	}
+	var zero A
+	return zero
+}
+
+// AsB returns the value as type B (panics if wrong type)
+func (u Union2[A, B]) AsB() B {
+	if u.tag == 1 && u.valueB != nil {
+		return *u.valueB
+	}
+	var zero B
+	return zero
+}
+
+// TryAsA safely tries to get the value as type A
+func (u Union2[A, B]) TryAsA() (A, bool) {
+	if u.tag == 0 && u.valueA != nil {
+		return *u.valueA, true
+	}
+	var zero A
+	return zero, false
+}
+
+// TryAsB safely tries to get the value as type B
+func (u Union2[A, B]) TryAsB() (B, bool) {
+	if u.tag == 1 && u.valueB != nil {
+		return *u.valueB, true
+	}
+	var zero B
+	return zero, false
+}
+
+// Union3 represents a union of 3 types
+type Union3[A any, B any, C any] struct {
+	tag    int
+	valueA *A
+	valueB *B
+	valueC *C
+}
+
+// NewUnion3A creates a Union3 with type A
+func NewUnion3A[A any, B any, C any](value A) Union3[A, B, C] {
+	return Union3[A, B, C]{tag: 0, valueA: &value}
+}
+
+// NewUnion3B creates a Union3 with type B
+func NewUnion3B[A any, B any, C any](value B) Union3[A, B, C] {
+	return Union3[A, B, C]{tag: 1, valueB: &value}
+}
+
+// NewUnion3C creates a Union3 with type C
+func NewUnion3C[A any, B any, C any](value C) Union3[A, B, C] {
+	return Union3[A, B, C]{tag: 2, valueC: &value}
+}
+
+// GetType returns the type index
+func (u Union3[A, B, C]) GetType() int {
+	return u.tag
+}
+
+// ============= Promise/Future Helpers =============
+
+// Future represents an asynchronous computation (TypeScript's Promise<T>)
+type Future[T any] struct {
+	done    chan struct{}
+	value   T
+	err     error
+	started bool
+}
+
+// NewFuture creates a new Future
+func NewFuture[T any](fn func() (T, error)) *Future[T] {
+	f := &Future[T]{
+		done:    make(chan struct{}),
+		started: true,
+	}
+
+	go func() {
+		defer close(f.done)
+		f.value, f.err = fn()
+	}()
+
+	return f
+}
+
+// Await waits for the future to complete and returns the result
+func (f *Future[T]) Await() (T, error) {
+	if !f.started {
+		var zero T
+		return zero, errors.New("future not started")
+	}
+
+	<-f.done
+	return f.value, f.err
+}
+
+// Then chains a function to execute after this future completes
+func (f *Future[T]) Then[U any](fn func(T) (U, error)) *Future[U] {
+	return NewFuture(func() (U, error) {
+		value, err := f.Await()
+		if err != nil {
+			var zero U
+			return zero, err
+		}
+		return fn(value)
+	})
+}
+
+// Catch handles errors in the future
+func (f *Future[T]) Catch(handler func(error) (T, error)) *Future[T] {
+	return NewFuture(func() (T, error) {
+		value, err := f.Await()
+		if err != nil {
+			return handler(err)
+		}
+		return value, nil
+	})
+}
+
+// Finally executes a function after the future completes (regardless of success or failure)
+func (f *Future[T]) Finally(fn func()) *Future[T] {
+	return NewFuture(func() (T, error) {
+		defer fn()
+		return f.Await()
+	})
+}
+
+// All waits for all futures to complete (Promise.all)
+func All[T any](futures ...*Future[T]) *Future[[]T] {
+	return NewFuture(func() ([]T, error) {
+		results := make([]T, len(futures))
+		for i, future := range futures {
+			value, err := future.Await()
+			if err != nil {
+				return nil, err
+			}
+			results[i] = value
+		}
+		return results, nil
+	})
+}
+
+// Race returns the first future to complete (Promise.race)
+func Race[T any](futures ...*Future[T]) *Future[T] {
+	return NewFuture(func() (T, error) {
+		resultChan := make(chan struct {
+			value T
+			err   error
+		}, len(futures))
+
+		for _, future := range futures {
+			go func(f *Future[T]) {
+				value, err := f.Await()
+				resultChan <- struct {
+					value T
+					err   error
+				}{value, err}
+			}(future)
+		}
+
+		result := <-resultChan
+		return result.value, result.err
+	})
+}
+
+// Resolve creates a resolved Future
+func Resolve[T any](value T) *Future[T] {
+	return NewFuture(func() (T, error) {
+		return value, nil
+	})
+}
+
+// Reject creates a rejected Future
+func Reject[T any](err error) *Future[T] {
+	return NewFuture(func() (T, error) {
+		var zero T
+		return zero, err
+	})
+}
+
+// ============= Type Checking Helpers =============
+
+// IsType checks if a value is of a specific type
+func IsType[T any](value interface{}) bool {
+	_, ok := value.(T)
+	return ok
+}
+
+// TypeOf returns the type name of a value
+func TypeOf(value interface{}) string {
+	if value == nil {
+		return "nil"
+	}
+	return reflect.TypeOf(value).String()
+}
+
+// ============= Deep Equality Helpers =============
+
+// DeepEqual performs deep equality comparison
+func DeepEqual(a, b interface{}) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+// ============= JSON Helpers =============
+
+// JSONStringify converts a value to JSON string
+func JSONStringify(value interface{}) (string, error) {
+	bytes, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
+// JSONParse parses a JSON string into a value
+func JSONParse(jsonStr string, target interface{}) error {
+	return json.Unmarshal([]byte(jsonStr), target)
+}
+
+// ============= Nullish Coalescing Helpers =============
+
+// Coalesce returns the first non-nil value (a ?? b)
+func Coalesce[T any](values ...*T) T {
+	for _, v := range values {
+		if v != nil {
+			return *v
+		}
+	}
+	var zero T
+	return zero
+}
+
+// CoalesceValue returns the first non-zero value
+func CoalesceValue[T comparable](values ...T) T {
+	var zero T
+	for _, v := range values {
+		if v != zero {
+			return v
+		}
+	}
+	return zero
+}
+
+// ============= Array Helpers =============
+
+// Map applies a function to each element of a slice
+func Map[T any, U any](slice []T, fn func(T) U) []U {
+	result := make([]U, len(slice))
+	for i, v := range slice {
+		result[i] = fn(v)
+	}
+	return result
+}
+
+// Filter returns a new slice containing elements that satisfy the predicate
+func Filter[T any](slice []T, predicate func(T) bool) []T {
+	result := make([]T, 0)
+	for _, v := range slice {
+		if predicate(v) {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// Reduce reduces a slice to a single value
+func Reduce[T any, U any](slice []T, initial U, fn func(U, T) U) U {
+	result := initial
+	for _, v := range slice {
+		result = fn(result, v)
+	}
+	return result
+}
+
+// Find returns the first element that satisfies the predicate
+func Find[T any](slice []T, predicate func(T) bool) (T, bool) {
+	for _, v := range slice {
+		if predicate(v) {
+			return v, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+// Every returns true if all elements satisfy the predicate
+func Every[T any](slice []T, predicate func(T) bool) bool {
+	for _, v := range slice {
+		if !predicate(v) {
+			return false
+		}
+	}
+	return true
+}
+
+// Some returns true if any element satisfies the predicate
+func Some[T any](slice []T, predicate func(T) bool) bool {
+	for _, v := range slice {
+		if predicate(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// ============= String Template Helpers =============
+
+// TemplateString formats a template string (TypeScript template literals)
+func TemplateString(format string, args ...interface{}) string {
+	return fmt.Sprintf(format, args...)
+}
+
+// ============= Error Helpers =============
+
+// Assert throws an error if condition is false
+func Assert(condition bool, message string) error {
+	if !condition {
+		return errors.New(message)
+	}
+	return nil
+}
+
+// Panic panics with a message if condition is false
+func Panic(condition bool, message string) {
+	if !condition {
+		panic(message)
+	}
+}
