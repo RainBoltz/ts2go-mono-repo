@@ -258,8 +258,8 @@ export class ClassDeclaration extends Declaration {
   constructor(
     name: string,
     public members: ClassMember[],
-    public extends?: TypeReference,
-    public implements?: TypeReference[],
+    public extendsClause?: TypeReference,
+    public implementsClause?: TypeReference[],
     public typeParameters?: TypeParameter[],
     modifiers: Modifier[] = [],
     location?: SourceLocation
@@ -312,7 +312,7 @@ export class InterfaceDeclaration extends Declaration {
   constructor(
     name: string,
     public members: PropertySignature[],
-    public extends?: TypeReference[],
+    public extendsClause?: TypeReference[],
     public typeParameters?: TypeParameter[],
     modifiers: Modifier[] = [],
     location?: SourceLocation
@@ -444,10 +444,10 @@ export class WhileStatement extends Statement {
 
 export class ForStatement extends Statement {
   constructor(
+    public body: Statement,
     public init?: VariableDeclaration | Expression,
     public test?: Expression,
     public update?: Expression,
-    public body: Statement,
     location?: SourceLocation
   ) {
     super(location);
@@ -490,8 +490,8 @@ export class TryStatement extends Statement {
 
 export class CatchClause extends IRNode {
   constructor(
-    public param?: Parameter,
     public body: BlockStatement,
+    public param?: Parameter,
     location?: SourceLocation
   ) {
     super(location);
@@ -531,8 +531,8 @@ export class SwitchStatement extends Statement {
 
 export class SwitchCase extends IRNode {
   constructor(
-    public test?: Expression, // null for default case
     public consequent: Statement[],
+    public test?: Expression, // null for default case
     location?: SourceLocation
   ) {
     super(location);
@@ -655,7 +655,7 @@ export class ArrowFunctionExpression extends Expression {
 export class CallExpression extends Expression {
   constructor(
     public callee: Expression,
-    public arguments: Expression[],
+    public args: Expression[],
     public typeArguments?: IRType[],
     location?: SourceLocation
   ) {
@@ -686,7 +686,7 @@ export class MemberExpression extends Expression {
 export class NewExpression extends Expression {
   constructor(
     public callee: Expression,
-    public arguments: Expression[],
+    public args: Expression[],
     public typeArguments?: IRType[],
     location?: SourceLocation
   ) {

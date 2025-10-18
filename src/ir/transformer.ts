@@ -13,9 +13,10 @@ export class IRTransformer {
   private typeChecker?: ts.TypeChecker;
 
   constructor(
-    private options: CompilerOptions
+    private options: CompilerOptions,
+    parser?: TypeScriptParser
   ) {
-    this.parser = new TypeScriptParser(options);
+    this.parser = parser || new TypeScriptParser(options);
   }
 
   /**
@@ -634,10 +635,13 @@ export class IRTransformer {
   }
 
   private transformIfStatement(node: ts.IfStatement): ir.IfStatement {
+    const thenStmt = this.transformStatement(node.thenStatement);
+    const elseStmt = node.elseStatement ? this.transformStatement(node.elseStatement) : undefined;
+
     return new ir.IfStatement(
       this.transformExpression(node.expression),
-      this.transformStatement(node.thenStatement)!,
-      node.elseStatement ? this.transformStatement(node.elseStatement) : undefined,
+      thenStmt || new ir.BlockStatement([]),
+      elseStmt || undefined,
       this.parser.getSourceLocation(node)
     );
   }
@@ -653,10 +657,10 @@ export class IRTransformer {
   private transformForStatement(node: ts.ForStatement): ir.ForStatement {
     // TODO: 完整實作
     return new ir.ForStatement(
-      undefined,
-      undefined,
-      undefined,
       this.transformStatement(node.statement)!,
+      undefined,
+      undefined,
+      undefined,
       this.parser.getSourceLocation(node)
     );
   }
@@ -698,8 +702,8 @@ export class IRTransformer {
   private transformCatchClause(node: ts.CatchClause): ir.CatchClause {
     // TODO: 完整實作
     return new ir.CatchClause(
-      undefined,
       this.transformBlock(node.block),
+      undefined,
       this.parser.getSourceLocation(node)
     );
   }
@@ -777,9 +781,12 @@ export class IRTransformer {
 
   private transformUnaryExpression(node: ts.UnaryExpression): ir.UnaryExpression {
     const op = this.getUnaryOperator(node);
+    const operand = ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node) ?
+      (node as any).operand :
+      (node as ts.PrefixUnaryExpression).operand;
     return new ir.UnaryExpression(
       op,
-      this.transformExpression(node.operand),
+      this.transformExpression(operand),
       ts.isPrefixUnaryExpression(node),
       this.parser.getSourceLocation(node)
     );

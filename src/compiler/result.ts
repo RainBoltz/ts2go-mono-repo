@@ -35,6 +35,7 @@ export interface SourceMap {
   sourcesContent?: string[];
   names: string[];
   mappings: string;
+  toJSON(): string;
 }
 
 export interface CompilationStatistics {

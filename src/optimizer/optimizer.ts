@@ -22,7 +22,7 @@ export class IROptimizer {
    * 初始化優化 passes
    */
   private initializePasses(): void {
-    const level = this.options.optimizationLevel || 1;
+    const level: number = this.options.optimizationLevel !== undefined ? this.options.optimizationLevel : 1;
 
     // Level 0: 不優化
     if (level === 0) return;
@@ -275,7 +275,7 @@ class SymbolCollector implements ir.IRVisitor<void> {
   }
   visitCallExpression(node: ir.CallExpression): void {
     node.callee.accept(this);
-    node.arguments.forEach(arg => arg.accept(this));
+    node.args.forEach(arg => arg.accept(this));
   }
   visitMemberExpression(node: ir.MemberExpression): void {
     node.object.accept(this);
@@ -283,7 +283,7 @@ class SymbolCollector implements ir.IRVisitor<void> {
   }
   visitNewExpression(node: ir.NewExpression): void {
     node.callee.accept(this);
-    node.arguments.forEach(arg => arg.accept(this));
+    node.args.forEach(arg => arg.accept(this));
   }
   visitBinaryExpression(node: ir.BinaryExpression): void {
     node.left.accept(this);

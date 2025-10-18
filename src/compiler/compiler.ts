@@ -2,12 +2,13 @@
  * 主編譯器介面
  */
 
+import * as ts from 'typescript';
 import { Module } from '../ir/nodes';
 import { CompilerOptions } from '../config/options';
 import { TypeScriptParser } from '../frontend/parser';
 import { IRTransformer } from '../ir/transformer';
 import { GoCodeGenerator } from '../backend/go-generator';
-import { CompilationResult, CompilationError } from './result';
+import { CompilationResult, CompilationError, GoProject, CompilationStatistics } from './result';
 import { IROptimizer } from '../optimizer/optimizer';
 
 export class Compiler {
@@ -18,7 +19,7 @@ export class Compiler {
 
   constructor(private options: CompilerOptions) {
     this.parser = new TypeScriptParser(options);
-    this.transformer = new IRTransformer(options);
+    this.transformer = new IRTransformer(options, this.parser);
     this.generator = new GoCodeGenerator(options);
     this.optimizer = new IROptimizer(options);
   }
@@ -78,9 +79,19 @@ export class Compiler {
       // 階段 4: 批次產生 Go 程式碼
       const goFiles = resolvedModules.map(m => this.generator.generate(m));
 
+      const filesMap = new Map<string, string>();
+      goFiles.forEach((file, index) => {
+        filesMap.set(resolvedModules[index].path, file.code);
+      });
+
+      const goProject: GoProject = {
+        goMod: 'module generated\n\ngo 1.21',
+        files: filesMap
+      };
+
       return {
         success: true,
-        output: { files: goFiles },
+        output: goProject,
         warnings: this.collectWarnings(),
         statistics: this.collectStatistics()
       };
@@ -116,7 +127,7 @@ export class Compiler {
     return [];
   }
 
-  private collectStatistics(): Record<string, any> {
+  private collectStatistics(): CompilationStatistics {
     // TODO: 收集編譯統計資訊
     return {
       filesProcessed: 0,

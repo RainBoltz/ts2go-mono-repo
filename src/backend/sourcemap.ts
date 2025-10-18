@@ -13,34 +13,45 @@ export interface SourceMapMapping {
 }
 
 export class SourceMap {
-  private mappings: SourceMapMapping[] = [];
-  private sources: Set<string> = new Set();
-  private names: Set<string> = new Set();
+  public version: number = 3;
+  public file: string = '';
+  public sourceRoot?: string;
+  public sources: string[] = [];
+  public sourcesContent?: string[];
+  public names: string[] = [];
+  public mappings: string = '';
+
+  private _mappings: SourceMapMapping[] = [];
+  private _sources: Set<string> = new Set();
+  private _names: Set<string> = new Set();
 
   /**
    * 添加一個對應關係
    */
   addMapping(mapping: SourceMapMapping): void {
-    this.mappings.push(mapping);
-    this.sources.add(mapping.originalFile);
+    this._mappings.push(mapping);
+    this._sources.add(mapping.originalFile);
     if (mapping.name) {
-      this.names.add(mapping.name);
+      this._names.add(mapping.name);
     }
+    // 更新公開屬性
+    this.sources = Array.from(this._sources);
+    this.names = Array.from(this._names);
+    this.mappings = this.encodeMappings();
   }
 
   /**
    * 產生 Source Map JSON
    */
   toJSON(): string {
-    const sourcesList = Array.from(this.sources);
-    const namesList = Array.from(this.names);
-
     const sourceMap = {
-      version: 3,
-      sources: sourcesList,
-      names: namesList,
-      mappings: this.encodeMappings(),
-      sourcesContent: [] as (string | null)[]
+      version: this.version,
+      file: this.file,
+      sourceRoot: this.sourceRoot,
+      sources: this.sources,
+      names: this.names,
+      mappings: this.mappings,
+      sourcesContent: this.sourcesContent || []
     };
 
     return JSON.stringify(sourceMap, null, 2);
@@ -60,14 +71,14 @@ export class SourceMap {
    * 獲取所有對應關係
    */
   getMappings(): SourceMapMapping[] {
-    return [...this.mappings];
+    return [...this._mappings];
   }
 
   /**
    * 根據產生的位置查找原始位置
    */
   findOriginal(line: number, column: number): SourceMapMapping | undefined {
-    return this.mappings.find(m =>
+    return this._mappings.find(m =>
       m.generatedLine === line && m.generatedColumn === column
     );
   }
@@ -76,7 +87,7 @@ export class SourceMap {
    * 根據原始位置查找產生的位置
    */
   findGenerated(file: string, line: number, column: number): SourceMapMapping | undefined {
-    return this.mappings.find(m =>
+    return this._mappings.find(m =>
       m.originalFile === file &&
       m.originalLine === line &&
       m.originalColumn === column

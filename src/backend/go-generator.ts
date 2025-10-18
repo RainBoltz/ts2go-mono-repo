@@ -380,13 +380,13 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     result += `type ${name}${typeParams} struct {\n`;
 
     // Embedding (extends/implements)
-    if (node.extends) {
+    if (node.extendsClause) {
       this.increaseIndent();
-      result += `${this.indent()}${node.extends.accept(this)}\n`;
+      result += `${this.indent()}${node.extendsClause.accept(this)}\n`;
       this.decreaseIndent();
     }
-    if (node.implements) {
-      for (const iface of node.implements) {
+    if (node.implementsClause) {
+      for (const iface of node.implementsClause) {
         this.increaseIndent();
         result += `${this.indent()}${iface.accept(this)}\n`;
         this.decreaseIndent();
@@ -542,9 +542,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     let result = `type ${name}${typeParams} interface {\n`;
 
     // Embedding
-    if (node.extends) {
+    if (node.extendsClause) {
       this.increaseIndent();
-      for (const ext of node.extends) {
+      for (const ext of node.extendsClause) {
         result += `${this.indent()}${ext.accept(this)}\n`;
       }
       this.decreaseIndent();
@@ -954,7 +954,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitCallExpression(node: ir.CallExpression): string {
     const callee = node.callee.accept(this);
-    const args = node.arguments.map(arg => arg.accept(this)).join(', ');
+    const args = node.args.map(arg => arg.accept(this)).join(', ');
 
     // 型別參數
     let typeArgs = '';
@@ -989,7 +989,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitNewExpression(node: ir.NewExpression): string {
     const callee = node.callee.accept(this);
-    const args = node.arguments.map(arg => arg.accept(this)).join(', ');
+    const args = node.args.map(arg => arg.accept(this)).join(', ');
 
     // TypeScript's new → Go's constructor function
     return `New${callee}(${args})`;
