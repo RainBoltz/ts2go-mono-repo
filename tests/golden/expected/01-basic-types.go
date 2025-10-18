@@ -2,6 +2,8 @@
 
 package main
 
+import "fmt"
+
 // 基本型別
 var str string = "hello"
 var num float64 = 42
@@ -15,6 +17,7 @@ var inferredBoolean = false
 
 // any 與 unknown
 var anyValue interface{} = 42
+
 // anyValue = "string"
 // anyValue = true
 

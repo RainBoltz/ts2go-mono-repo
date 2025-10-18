@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build outputs
+dist/
+build/
+*.js
+*.js.map
+*.d.ts
+
+# Keep source TypeScript files
+!src/**/*.ts
+!tests/**/*.ts
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Generated Go files (for testing)
+tests/golden/generated/
+
+# TypeScript cache
+*.tsbuildinfo
