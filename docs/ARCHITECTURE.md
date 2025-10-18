@@ -116,9 +116,9 @@ IRNode (抽象基類)
 **職責**：從 IR 產生慣用的 Go 程式碼
 
 **核心模組**：
-- `backend/go-generator.ts`: Go 程式碼產生器
-- `backend/type-mapper.ts`: 型別對映策略
-- `backend/name-mangler.ts`: 名稱轉換
+- `backend/go-generator.ts`: Go 程式碼產生器 ✅
+- `backend/type-mapper.ts`: 型別對映策略 ✅
+- `backend/sourcemap.ts`: Source Map 產生 ✅
 
 **產生策略**：
 
@@ -197,24 +197,41 @@ func wrapper() (err error) {
 
 #### 3. 程式碼產生
 
-**使用 `go/ast` 與 `go/printer`**：
+**使用 Visitor 模式直接產生 Go 程式碼**：
 
 ```typescript
-class GoCodeGenerator {
-  generateFile(module: Module): string {
-    const file = this.createASTFile(module);
-    return this.printAST(file);
+class GoCodeGenerator implements IRVisitor<string> {
+  generate(module: Module): GeneratedCode {
+    const code = this.visitModule(module);
+    return {
+      code,
+      sourceMap: this.sourceMap
+    };
   }
 
-  private createASTFile(module: Module): *ast.File {
-    // 建立 Go AST
+  visitModule(node: Module): string {
+    // 產生 package 聲明
+    // 收集 imports
+    // 遍歷所有宣告並產生程式碼
   }
 
-  private printAST(file: *ast.File): string {
-    // 使用 go/printer 產生格式化程式碼
-  }
+  // 實作所有 IR 節點的 visit 方法
+  visitFunctionDeclaration(node: FunctionDeclaration): string { ... }
+  visitClassDeclaration(node: ClassDeclaration): string { ... }
+  // ... 40+ visitor 方法
 }
 ```
+
+**已實作功能** ✅：
+- 完整的 Visitor 模式實作
+- 自動 import 管理
+- 縮排與格式化
+- Constructor 產生 (NewXxx functions)
+- Method 產生 (pointer receivers)
+- 泛型支援 (Go 1.18+)
+- Union type 三種策略 (tagged/interface/any)
+- Async 函式 → context.Context + error
+- Template literals → fmt.Sprintf
 
 ## 資料流
 
@@ -298,22 +315,22 @@ class GoCodeGenerator {
 - `future`: Channel-based Future 模式
 - `errgroup`: 使用 sync/errgroup
 
-## 優化階段
+## 優化階段 ✅
 
 ### Pass 管線
 
 ```
 IR
  ↓
-[Pass 1] 控制流正規化
+[Pass 1] 死碼消除 ✅
  ↓
-[Pass 2] 型別簡化
+[Pass 2] 常數折疊 ✅
  ↓
-[Pass 3] 死碼消除
+[Pass 3] 型別簡化 (Level 2) ✅
  ↓
-[Pass 4] 常數折疊
+[Pass 4] 控制流正規化 (Level 2) ✅
  ↓
-[Pass 5] 內聯優化
+[Pass 5] 內聯優化 (Level 2, 可選) ✅
  ↓
 Optimized IR
 ```
@@ -321,23 +338,46 @@ Optimized IR
 ### 實作範例
 
 ```typescript
-class OptimizationPipeline {
-  private passes: Pass[] = [
-    new ControlFlowNormalizationPass(),
-    new TypeSimplificationPass(),
-    new DeadCodeEliminationPass(),
-    new ConstantFoldingPass(),
-  ];
+class IROptimizer {
+  private passes: OptimizationPass[] = [];
+
+  constructor(private options: CompilerOptions) {
+    this.initializePasses();
+  }
+
+  private initializePasses(): void {
+    const level = this.options.optimizationLevel || 1;
+
+    // Level 1: 基本優化
+    if (level >= 1) {
+      this.passes.push(new DeadCodeEliminationPass());
+      this.passes.push(new ConstantFoldingPass());
+    }
+
+    // Level 2: 進階優化
+    if (level >= 2) {
+      this.passes.push(new TypeSimplificationPass());
+      this.passes.push(new ControlFlowNormalizationPass());
+      this.passes.push(new InliningPass());
+    }
+  }
 
   optimize(module: Module): Module {
-    let current = module;
+    let optimized = module;
     for (const pass of this.passes) {
-      current = pass.transform(current);
+      optimized = pass.run(optimized, this.options);
     }
-    return current;
+    return optimized;
   }
 }
 ```
+
+**已實作** ✅：
+- 完整的優化框架 (`src/optimizer/optimizer.ts`)
+- 死碼消除 (移除未使用的變數、函式、型別)
+- 符號使用分析 (SymbolCollector with full IR visitor)
+- 保留 export 的符號
+- 可配置的優化等級 (0-2)
 
 ## 錯誤處理
 
@@ -360,53 +400,84 @@ Error E2001: Union type too complex
    = help: Use intersection types or interfaces instead
 ```
 
-## 測試策略
+## 測試策略 ✅
 
-### 1. 黃金測試
+### 1. 黃金測試 ✅
 
 固定輸入與輸出，驗證轉譯結果：
 
+**實作** (`tests/helpers/golden-test.ts`):
 ```typescript
-describe('Golden Tests', () => {
-  const goldenTests = loadGoldenTests('tests/golden');
+export class GoldenTestRunner {
+  async runGoldenTest(testCase: GoldenTestCase): Promise<GoldenTestResult> {
+    // 讀取預期輸出
+    const expectedCode = fs.readFileSync(expectedPath, 'utf-8');
 
-  for (const test of goldenTests) {
-    it(test.name, async () => {
-      const result = await compiler.compile(test.input);
-      expect(result.output).toEqual(test.expected);
-    });
+    // 編譯 TypeScript 到 Go
+    const compiler = new Compiler(options);
+    const result = await compiler.compileFile(inputPath);
+
+    // 比對生成的程式碼與預期的程式碼
+    const comparison = this.compareCode(result.output, expectedCode);
+
+    return { passed: comparison.match, diff: comparison.diff };
   }
-});
+}
 ```
 
-### 2. 差分測試
+**10 個黃金測試樣例** ✅：
+1. 01-basic-types.ts → 01-basic-types.go
+2. 02-interfaces-classes.ts → 02-interfaces-classes.go
+3. 03-generics.ts → 03-generics.go
+4. 04-union-intersection.ts → 04-union-intersection.go
+5. 05-async-await.ts → 05-async-await.go
+6. 06-error-handling.ts → 06-error-handling.go
+7. 07-enums-namespaces.ts → 07-enums-namespaces.go
+8. 08-arrays-iterators.ts → 08-arrays-iterators.go
+9. 09-modules-imports.ts → 09-modules-imports.go
+10. 10-advanced-types.ts → 10-advanced-types.go
 
-比較 TypeScript 與 Go 的執行結果：
+**Jest 設定** ✅：
+- 自訂 matchers: `toMatchGoCode()`, `toBeValidGo()`
+- 詳細的 diff 報告
+- 30 秒測試超時
 
+### 2. 差分測試 ✅
+
+比較不同編譯策略的輸出：
+
+**實作** (`tests/helpers/diff-tool.ts`):
 ```typescript
-describe('Differential Tests', () => {
-  it('arithmetic operations', async () => {
-    const tsResult = await runTypeScript('1 + 2 * 3');
-    const goResult = await runGo(compile('1 + 2 * 3'));
-    expect(tsResult).toEqual(goResult);
-  });
-});
+export class DifferentialTestRunner {
+  async compareStrategies(
+    inputFile: string,
+    strategy1: StrategyConfig,
+    strategy2: StrategyConfig
+  ): Promise<DiffTestResult> {
+    // 使用策略 1 編譯
+    const result1 = await this.compileWithStrategy(inputFile, strategy1);
+
+    // 使用策略 2 編譯
+    const result2 = await this.compileWithStrategy(inputFile, strategy2);
+
+    // 分析差異
+    const differences = this.analyzeDifferences(result1, result2);
+
+    return { strategy1: result1, strategy2: result2, differences };
+  }
+}
 ```
+
+**預定義策略** ✅：
+- `default`: 預設配置
+- `int_numbers`: number → int
+- `interface_unions`: union → interface
+- `zero_nullability`: 零值表示 null
+- `strict`: 嚴格模式
 
 ### 3. 模糊測試
 
-隨機生成 TypeScript 程式碼，驗證編譯器穩定性：
-
-```typescript
-describe('Fuzz Tests', () => {
-  it('handles random expressions', () => {
-    for (let i = 0; i < 1000; i++) {
-      const expr = generateRandomExpression();
-      expect(() => compiler.compile(expr)).not.toThrow();
-    }
-  });
-});
-```
+TODO: 未來實作隨機生成測試
 
 ## 效能考量
 
@@ -445,25 +516,111 @@ class MyOptimizationPass implements Pass {
 pipeline.addPass(new MyOptimizationPass());
 ```
 
-## 未來規劃
+## Runtime 輔助系統 ✅
 
-### 短期目標（3 個月內）
-- [ ] 完成 Go 程式碼產生器
-- [ ] 實作所有核心型別對映
-- [ ] 支援基本的 async/await
-- [ ] 建立完整的測試套件
+**位置**: `src/runtime/`
 
-### 中期目標（6 個月內）
-- [ ] 支援完整的 Union/Intersection
-- [ ] 實作 Mapped/Conditional Types
-- [ ] 產生 Source Map
-- [ ] CLI 工具與 VS Code 擴充
+### Runtime Helpers (`helpers.go.template`) ✅
 
-### 長期目標（1 年內）
-- [ ] 支援大型專案轉譯
-- [ ] 效能基準測試與優化
-- [ ] 生態系統整合（NPM 套件對映）
-- [ ] 社群驅動的型別對映庫
+**Optional Chaining**:
+```go
+type OptionalValue[T any] struct {
+    value   T
+    present bool
+}
+
+func (o OptionalValue[T]) Map[U any](fn func(T) U) OptionalValue[U]
+func (o OptionalValue[T]) GetOrDefault(defaultValue T) T
+```
+
+**Union Types**:
+```go
+type Union2[A any, B any] struct {
+    tag    int
+    valueA *A
+    valueB *B
+}
+
+func (u Union2[A, B]) IsType(typeIndex int) bool
+func (u Union2[A, B]) AsA() A
+func (u Union2[A, B]) TryAsA() (A, bool)
+```
+
+**Promise/Future**:
+```go
+type Future[T any] struct {
+    done  chan struct{}
+    value T
+    err   error
+}
+
+func (f *Future[T]) Then[U any](fn func(T) (U, error)) *Future[U]
+func (f *Future[T]) Catch(handler func(error) (T, error)) *Future[T]
+func All[T any](futures ...*Future[T]) *Future[[]T]
+func Race[T any](futures ...*Future[T]) *Future[T]
+```
+
+**Array Helpers**:
+```go
+func Map[T any, U any](slice []T, fn func(T) U) []U
+func Filter[T any](slice []T, predicate func(T) bool) []T
+func Reduce[T any, U any](slice []T, initial U, fn func(U, T) U) U
+func Find[T any](slice []T, predicate func(T) bool) (T, bool)
+```
+
+**Runtime Generator** (`runtime-generator.ts`) ✅:
+- 可選擇性產生 runtime 功能
+- 模組化的 feature 選擇
+- 自訂 package 名稱
+
+### CLI 工具 ✅
+
+**位置**: `src/cli.ts`
+
+**命令**:
+```bash
+ts2go compile <input> -o <output>    # 編譯
+ts2go watch <input> -o <output>       # 監聽模式
+ts2go init                            # 初始化配置
+ts2go info <file>                     # 分析檔案
+ts2go runtime -o <dir>                # 產生 runtime
+```
+
+**功能** ✅:
+- 單檔案和批次編譯
+- Watch 模式 (使用 chokidar)
+- 彩色輸出 (使用 chalk)
+- 詳細日誌模式
+- 配置檔支援 (ts2go.json)
+- 錯誤報告與堆疊追蹤
+
+## 實作進度
+
+### ✅ 已完成
+- [x] IR 型別系統 (40+ 節點類型)
+- [x] TypeScript Parser (完整型別檢查)
+- [x] IR Transformer (AST → IR)
+- [x] Go Code Generator (完整實作)
+- [x] Type Mapper (多策略支援)
+- [x] Source Map 產生
+- [x] Optimization System (死碼消除等)
+- [x] Test Framework (Jest + Golden Tests)
+- [x] Differential Testing Tool
+- [x] Runtime Helpers (Go template)
+- [x] CLI Tool (完整功能)
+- [x] 10 個黃金測試樣例
+
+### 🚧 進行中
+- [ ] 完整的 Mapped/Conditional Types
+- [ ] 更精確的型別推斷
+- [ ] 模組相依性解析
+
+### 📋 未來計劃
+- [ ] 增量編譯
+- [ ] VS Code 擴充
+- [ ] 效能基準測試
+- [ ] NPM 套件對映
+- [ ] 社群型別庫
 
 ## 參考資料
 

@@ -300,18 +300,27 @@ ts2go src/ -c ts2go.json
 - [x] TypeScript Parser 實作
 - [x] IR 轉換器核心框架
 - [x] 10 個黃金測試樣例設計
+- [x] Go 程式碼產生器完整實作
+- [x] 型別對映策略系統 (TypeMapper)
+- [x] Source Map 產生
+- [x] 測試框架建置 (Jest + Golden Tests)
+- [x] 差分測試工具 (Differential Testing)
+- [x] CLI 工具完整實作
+- [x] Runtime 輔助函式庫 (Optional, Union, Future, Array helpers)
+- [x] 優化系統 (Dead Code Elimination, Constant Folding 等)
+- [x] Union/Intersection 基礎支援
+- [x] Watch 模式
 
 ### 🚧 進行中
-- [ ] Go 程式碼產生器實作
-- [ ] 測試框架建置
+- [ ] 完整的 Mapped/Conditional Types 處理
+- [ ] 更精確的型別推斷
+- [ ] 模組相依性完整解析
 
 ### 📋 計劃中
-- [ ] Union/Intersection 完整支援
-- [ ] Mapped/Conditional Types 處理
-- [ ] Source Map 產生
-- [ ] CLI 工具完善
-- [ ] Runtime 輔助函式庫
 - [ ] 效能優化與基準測試
+- [ ] 增量編譯支援
+- [ ] 更多語言特性支援 (Decorators, Reflection)
+- [ ] 生產環境穩定性提升
 - [ ] 文件與範例完善
 
 ## 語義陷阱清單
@@ -345,7 +354,7 @@ ts2go src/ -c ts2go.json
 
 ## 授權
 
-MIT License - 詳見 [LICENSE](LICENSE) 檔案
+GPL License - 詳見 [LICENSE](LICENSE) 檔案
 
 ## 致謝
 
