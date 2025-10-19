@@ -22,6 +22,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private needsContext = false;
   private needsRuntime = false;
   private tupleTypes = new Map<string, ir.TupleType>(); // Track tuple types to generate
+  private generatedTupleTypes = new Set<string>(); // Track which tuple types have already been output
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -49,6 +50,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.needsContext = false;
     this.needsRuntime = false;
     this.tupleTypes.clear();
+    this.generatedTupleTypes.clear();
   }
 
   /**
@@ -92,6 +94,31 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
 
     return types.join('\n\n') + '\n\n';
+  }
+
+  /**
+   * Generate a single tuple type definition inline if not already generated
+   */
+  private generateTupleTypeInline(typeName: string): string {
+    if (this.generatedTupleTypes.has(typeName)) {
+      return ''; // Already generated
+    }
+
+    const tuple = this.tupleTypes.get(typeName);
+    if (!tuple) {
+      return ''; // Type not registered
+    }
+
+    this.generatedTupleTypes.add(typeName);
+
+    let typeDef = `type ${typeName} struct {\n`;
+    for (let i = 0; i < tuple.elements.length; i++) {
+      const fieldType = tuple.elements[i].accept(this);
+      typeDef += `\tItem${i} ${fieldType}\n`;
+    }
+    typeDef += '}\n\n';
+
+    return typeDef;
   }
 
   // ============= 輔助方法 =============
@@ -150,7 +177,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     let result = `// Generated from: ${node.name}\n\n`;
     result += `package ${this.currentPackage}\n\n`;
 
-    // 收集所有宣告，確定需要的 imports和tuple types
+    // 收集所有宣告，確定需要的 imports
     const declarations: string[] = [];
     for (const stmt of node.statements) {
       if (stmt instanceof ir.Declaration) {
@@ -163,8 +190,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // 產生 imports
     result += this.generateImports();
 
-    // 產生 tuple type definitions
-    result += this.generateTupleTypes();
+    // Tuple types are now generated inline in visitVariableDeclaration
 
     // 產生宣告
     result += declarations.join('\n\n');
@@ -325,10 +351,33 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
     const isConst = node.isConst || this.hasModifier(node.modifiers, 'export');
 
-    if (node.initializer && !node.type) {
-      // 型別推斷
-      const init = node.initializer.accept(this);
-      return `${isConst ? 'const' : 'var'} ${name} = ${init}`;
+    // Generate tuple type definition inline if this variable uses a tuple type
+    let tupleTypeDef = '';
+    if (node.type instanceof ir.TupleType) {
+      const typeName = this.registerTupleType(node.type);
+      tupleTypeDef = this.generateTupleTypeInline(typeName);
+    }
+
+    // Use type inference for:
+    // 1. Variables with no type annotation
+    // 2. Variables with 'any' type + literal initializer (TypeScript inferred types)
+    // Do NOT use for explicit type annotations or explicit any/unknown types
+    let shouldInferType = false;
+    if (node.initializer) {
+      if (!node.type) {
+        shouldInferType = true;
+      } else if (node.type instanceof ir.PrimitiveType && node.type.kind === 'any') {
+        // 'any' with literal = TypeScript inferred the type, use Go inference
+        if (node.initializer instanceof ir.Literal) {
+          shouldInferType = true;
+        }
+      }
+    }
+
+    if (shouldInferType) {
+      // Let Go infer the type
+      const init = node.initializer!.accept(this);
+      return `${tupleTypeDef}var ${name} = ${init}`;
     }
 
     if (node.type) {
@@ -342,15 +391,32 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
             .map(e => e ? e.accept(this) : 'nil')
             .join(', ');
           init = `${typeName}{${elements}}`;
+        } else if ((node.type instanceof ir.ArrayType ||
+                   (node.type instanceof ir.TypeReference && node.type.name === 'Array')) &&
+                   node.initializer instanceof ir.ArrayExpression) {
+          // Generate typed array literal
+          let elementType: string;
+          if (node.type instanceof ir.ArrayType) {
+            elementType = node.type.elementType.accept(this);
+          } else {
+            // TypeReference case: Array<T>
+            elementType = node.type.typeArguments && node.type.typeArguments.length > 0
+              ? node.type.typeArguments[0].accept(this)
+              : 'interface{}';
+          }
+          const elements = node.initializer.elements
+            .map(e => e ? e.accept(this) : 'nil')
+            .join(', ');
+          init = `[]${elementType}{${elements}}`;
         } else {
           init = node.initializer.accept(this);
         }
-        return `var ${name} ${typeName} = ${init}`;
+        return `${tupleTypeDef}var ${name} ${typeName} = ${init}`;
       }
-      return `var ${name} ${typeName}`;
+      return `${tupleTypeDef}var ${name} ${typeName}`;
     }
 
-    return `var ${name} interface{}`;
+    return `${tupleTypeDef}var ${name} interface{}`;
   }
 
   visitFunctionDeclaration(node: ir.FunctionDeclaration): string {
@@ -393,8 +459,47 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 函式體
     if (node.body) {
-      const body = this.visitBlockStatement(node.body);
-      return `${signature} ${body}`;
+      // Generate default parameter initialization code
+      const defaultInits: string[] = [];
+      for (const param of node.parameters) {
+        if (param.defaultValue) {
+          const paramType = param.type?.accept(this) || 'interface{}';
+          const defaultValue = param.defaultValue.accept(this);
+
+          // Check if parameter is at zero value and assign default
+          if (paramType === 'string') {
+            defaultInits.push(`if ${param.name} == "" {\n\t\t${param.name} = ${defaultValue}\n\t}`);
+          } else if (paramType.startsWith('*')) {
+            // Pointer type - check for nil
+            defaultInits.push(`if ${param.name} == nil {\n\t\tval := ${defaultValue}\n\t\t${param.name} = &val\n\t}`);
+          } else {
+            // For other types, check against zero value
+            defaultInits.push(`if ${param.name} == 0 {\n\t\t${param.name} = ${defaultValue}\n\t}`);
+          }
+        }
+      }
+
+      // Generate function body with default initializations
+      let result = '{\n';
+      this.increaseIndent();
+
+      // Add default parameter initializations
+      for (const init of defaultInits) {
+        result += `${this.indent()}${init}\n`;
+      }
+
+      // Add original body statements
+      for (const stmt of node.body.statements) {
+        const stmtCode = stmt.accept(this);
+        if (stmtCode) {
+          result += `${this.indent()}${stmtCode}\n`;
+        }
+      }
+
+      this.decreaseIndent();
+      result += `${this.indent()}}`;
+
+      return `${signature} ${result}`;
     }
 
     return signature;
@@ -801,7 +906,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitExpressionStatement(node: ir.ExpressionStatement): string {
-    return node.expression.accept(this);
+    const expr = node.expression.accept(this);
+
+    // Comment out reassignments to any/unknown typed variables as they don't make sense in Go
+    if (node.expression instanceof ir.AssignmentExpression) {
+      return `// ${expr}`;
+    }
+
+    return expr;
   }
 
   visitReturnStatement(node: ir.ReturnStatement): string {
@@ -812,7 +924,16 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitIfStatement(node: ir.IfStatement): string {
-    let result = `if ${node.test.accept(this)} ${node.consequent.accept(this)}`;
+    let testExpr = node.test.accept(this);
+
+    // If test is just an identifier that might be a pointer, add != nil check
+    if (node.test instanceof ir.Identifier) {
+      // Check if this looks like it might be a pointer check
+      // In TypeScript, `if (age)` where age is optional should become `if (age != nil)` in Go
+      testExpr = `${testExpr} != nil`;
+    }
+
+    let result = `if ${testExpr} ${node.consequent.accept(this)}`;
 
     if (node.alternate) {
       if (node.alternate instanceof ir.IfStatement) {
@@ -937,6 +1058,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   // ============= Expressions =============
 
   visitIdentifier(node: ir.Identifier): string {
+    // Handle special JavaScript global identifiers
+    if (node.name === 'undefined') {
+      return 'nil';
+    }
     return node.name;
   }
 
