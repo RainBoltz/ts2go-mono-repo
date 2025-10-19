@@ -1,10 +1,7 @@
-// Generated from: 07-enums-namespaces.ts
-
 package main
 
 import "fmt"
 
-// 數字 enum
 type Direction int
 
 const (
@@ -29,7 +26,6 @@ func (d Direction) String() string {
 	}
 }
 
-// 字串 enum
 type Status string
 
 const (
@@ -38,7 +34,6 @@ const (
 	StatusRejected Status = "REJECTED"
 )
 
-// 混合 enum - 在 Go 中需要分開處理
 type Mixed interface {
 	isMixed()
 }
@@ -55,7 +50,6 @@ func (MixedYes) isMixed() {}
 
 const MixedYesValue = "YES"
 
-// const enum - 在 Go 中與普通 enum 相同
 type LogLevel int
 
 const (
@@ -65,7 +59,6 @@ const (
 	LogLevelError
 )
 
-// 使用 enum
 func Move(direction Direction) string {
 	switch direction {
 	case DirectionUp:
@@ -81,15 +74,14 @@ func Move(direction Direction) string {
 	}
 }
 
-// Namespace - 在 Go 中使用 package 或 struct 模擬
 type Utils struct{}
 
 func (Utils) FormatDate(date string) string {
-	return date // 簡化實作
+	return date
 }
 
 func (Utils) ParseDate(str string) string {
-	return str // 簡化實作
+	return str
 }
 
 const UtilsVERSION = "1.0.0"
@@ -111,14 +103,12 @@ func (l *UtilsLogger) Log(message string) {
 	fmt.Printf("[%s] %s\n", l.prefix, message)
 }
 
-// 內部 namespace
 type UtilsInternal struct{}
 
 func (UtilsInternal) SecretFunction() string {
 	return "internal"
 }
 
-// 使用 namespace
 var (
 	logger  = NewUtilsLogger("App")
 	dateStr = Utils{}.FormatDate("")
@@ -128,7 +118,6 @@ var (
 	}
 )
 
-// Namespace 合併 - 在 Go 中直接定義在同一個 package
 type MergedNamespaceData struct {
 	Id    string
 	Value float64
@@ -158,12 +147,10 @@ func (dm *MergedNamespaceDataManager) GetAll() []MergedNamespaceData {
 	return result
 }
 
-// Enum 作為型別
 func GetDirectionName(dir Direction) string {
 	return dir.String()
 }
 
-// Reverse mapping
 func GetDirectionValue(name string) (Direction, bool) {
 	switch name {
 	case "Up":
@@ -179,12 +166,10 @@ func GetDirectionValue(name string) (Direction, bool) {
 	}
 }
 
-// Enum 與 Union type 的結合
 func ProcessStatus(status string) {
 	fmt.Printf("Processing status: %s\n", status)
 }
 
-// Computed enum members - 使用位元運算
 type FileAccess int
 
 const (

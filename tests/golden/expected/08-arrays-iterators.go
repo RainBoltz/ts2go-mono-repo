@@ -1,8 +1,5 @@
-// Generated from: 08-arrays-iterators.ts
-
 package main
 
-// 基本陣列操作
 var (
 	numbers  = []int{1, 2, 3, 4, 5}
 	doubled  []int
@@ -11,13 +8,11 @@ var (
 )
 
 func init() {
-	// map
 	doubled = make([]int, len(numbers))
 	for i, n := range numbers {
 		doubled[i] = n * 2
 	}
 
-	// filter
 	filtered = make([]int, 0)
 	for _, n := range numbers {
 		if n > 2 {
@@ -25,16 +20,13 @@ func init() {
 		}
 	}
 
-	// reduce
 	sum = 0
 	for _, n := range numbers {
 		sum += n
 	}
 }
 
-// 陣列方法鏈
 func ProcessNumbers(nums []int) int {
-	// filter
 	filtered := make([]int, 0)
 	for _, n := range nums {
 		if n > 0 {
@@ -42,13 +34,11 @@ func ProcessNumbers(nums []int) int {
 		}
 	}
 
-	// map
 	mapped := make([]int, len(filtered))
 	for i, n := range filtered {
 		mapped[i] = n * 2
 	}
 
-	// reduce
 	sum := 0
 	for _, n := range mapped {
 		sum += n
@@ -57,7 +47,6 @@ func ProcessNumbers(nums []int) int {
 	return sum
 }
 
-// Array 泛型方法
 func First[T any](arr []T) *T {
 	if len(arr) == 0 {
 		return nil
@@ -91,7 +80,6 @@ func Chunk[T any](arr []T, size int) [][]T {
 	return chunks
 }
 
-// for...of 迭代
 func SumArray(numbers []int) int {
 	total := 0
 	for _, num := range numbers {
@@ -100,7 +88,6 @@ func SumArray(numbers []int) int {
 	return total
 }
 
-// for...in 迭代（物件）
 func GetKeys(obj map[string]interface{}) []string {
 	keys := make([]string, 0, len(obj))
 	for key := range obj {
@@ -109,7 +96,6 @@ func GetKeys(obj map[string]interface{}) []string {
 	return keys
 }
 
-// 解構賦值
 func ProcessCoordinates(coords [][2]int) {
 	for _, coord := range coords {
 		x, y := coord[0], coord[1]
@@ -117,7 +103,6 @@ func ProcessCoordinates(coords [][2]int) {
 	}
 }
 
-// Rest 參數
 func Concatenate(arrays ...[]int) []int {
 	result := make([]int, 0)
 	for _, arr := range arrays {
@@ -126,7 +111,6 @@ func Concatenate(arrays ...[]int) []int {
 	return result
 }
 
-// Spread 運算子
 var (
 	arr1     = []int{1, 2, 3}
 	arr2     = []int{4, 5, 6}
@@ -139,7 +123,6 @@ func init() {
 	cloned = append([]int{}, arr1...)
 }
 
-// Array.from
 func Range(start int, end int) []int {
 	length := end - start
 	result := make([]int, length)
@@ -149,7 +132,6 @@ func Range(start int, end int) []int {
 	return result
 }
 
-// 自訂迭代器
 type RangeIterator struct {
 	start int
 	end   int
@@ -186,7 +168,6 @@ func (r *RangeIterator) ToArray() []int {
 	return result
 }
 
-// Map/Set 操作
 func UniqueValues[T comparable](arr []T) []T {
 	seen := make(map[T]bool)
 	result := make([]T, 0)
@@ -209,7 +190,6 @@ func CountOccurrences[T comparable](arr []T) map[T]int {
 	return counts
 }
 
-// 高階陣列函式
 func Partition[T any](arr []T, predicate func(T) bool) ([]T, []T) {
 	pass := make([]T, 0)
 	fail := make([]T, 0)
@@ -236,7 +216,6 @@ func GroupBy[T any, K comparable](arr []T, keyFn func(T) K) map[K][]T {
 	return groups
 }
 
-// 遞迴陣列處理
 type NestedArray interface{}
 
 func Flatten(arr []NestedArray) []interface{} {

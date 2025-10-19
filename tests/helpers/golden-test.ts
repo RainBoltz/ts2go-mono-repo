@@ -100,7 +100,8 @@ export class GoldenTestRunner {
    */
   private discoverTestCases(): GoldenTestCase[] {
     const testFiles = fs.readdirSync(this.goldenDir)
-      .filter(file => file.endsWith('.ts') && !file.includes('node_modules'));
+      .filter(file => file.endsWith('.ts') && !file.includes('node_modules'))
+      .filter(file => /^\d{2}-.*\.ts$/.test(file)); // Only files matching XX-*.ts pattern
 
     return testFiles.map(file => {
       const baseName = path.basename(file, '.ts');

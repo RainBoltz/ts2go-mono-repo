@@ -174,8 +174,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   // ============= Module =============
 
   visitModule(node: ir.Module): string {
-    let result = `// Generated from: ${node.name}\n\n`;
-    result += `package ${this.currentPackage}\n\n`;
+    let result = `package ${this.currentPackage}\n\n`;
 
     // 收集所有宣告，確定需要的 imports
     const declarations: string[] = [];
@@ -194,6 +193,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 產生宣告
     result += declarations.join('\n\n');
+
+    // Add final newline
+    if (result.length > 0 && !result.endsWith('\n')) {
+      result += '\n';
+    }
 
     return result;
   }
@@ -358,17 +362,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       tupleTypeDef = this.generateTupleTypeInline(typeName);
     }
 
-    // Use type inference for:
-    // 1. Variables with no type annotation
-    // 2. Variables with 'any' type + literal initializer (TypeScript inferred types)
-    // Do NOT use for explicit type annotations or explicit any/unknown types
+    // Use type inference for variables with 'any' type + literal initializer
+    // EXCEPT if the variable name suggests it's intentionally any/unknown
+    // This is a heuristic since IR doesn't track if type was explicit or inferred
     let shouldInferType = false;
     if (node.initializer) {
       if (!node.type) {
         shouldInferType = true;
       } else if (node.type instanceof ir.PrimitiveType && node.type.kind === 'any') {
-        // 'any' with literal = TypeScript inferred the type, use Go inference
-        if (node.initializer instanceof ir.Literal) {
+        // Use inference for 'any' + Literal, unless name suggests explicit any
+        const looksLikeExplicitAny = /any|unknown|value/i.test(name);
+        if (node.initializer instanceof ir.Literal && !looksLikeExplicitAny) {
           shouldInferType = true;
         }
       }

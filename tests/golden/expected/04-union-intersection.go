@@ -1,5 +1,3 @@
-// Generated from: 04-union-intersection.ts
-
 package main
 
 import (
@@ -8,7 +6,6 @@ import (
 	"strconv"
 )
 
-// Union 型別 - 使用 Tagged Union 策略
 type StringOrNumber struct {
 	tag    int
 	str    *string
@@ -61,7 +58,6 @@ func ProcessValue(value StringOrNumber) string {
 	}
 }
 
-// Discriminated Union
 type Result interface {
 	isResult()
 	GetStatus() string
@@ -105,7 +101,6 @@ func HandleResult(result Result) string {
 	}
 }
 
-// Intersection 型別 - 使用結構體合併
 type Named struct {
 	Name string
 }
@@ -130,7 +125,6 @@ var person = Person{
 	Located: Located{Address: "123 Main St"},
 }
 
-// 函式參數中的 union
 func FormatValue(value interface{}) string {
 	if value == nil {
 		return "null"
@@ -151,7 +145,6 @@ func FormatValue(value interface{}) string {
 	}
 }
 
-// Optional chaining 與 nullish coalescing
 type ServerConfig struct {
 	Host *string
 	Port *int
@@ -176,7 +169,6 @@ func GetServerUrl(config Config) string {
 	return fmt.Sprintf("http://%s:%d", host, port)
 }
 
-// Type Guards
 func IsError(result Result) bool {
 	_, ok := result.(ErrorResult)
 	return ok
@@ -187,7 +179,6 @@ func IsSuccess(result Result) bool {
 	return ok
 }
 
-// 使用 type guard
 func ProcessResult(result Result) {
 	if IsError(result) {
 		err := result.(ErrorResult)

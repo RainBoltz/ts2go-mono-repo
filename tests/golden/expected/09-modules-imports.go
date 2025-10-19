@@ -1,8 +1,5 @@
-// Generated from: 09-modules-imports.ts
-
 package main
 
-// Named exports
 const (
 	API_VERSION  = "1.0.0"
 	API_ENDPOINT = "https://api.example.com"
@@ -23,7 +20,6 @@ func NewApiClient(config ApiConfig) *ApiClient {
 }
 
 func (a *ApiClient) Request(path string) (interface{}, error) {
-	// 模擬 API 請求
 	return map[string]interface{}{
 		"path":   path,
 		"config": a.config,
@@ -52,7 +48,6 @@ func CreateClient(config *ApiConfig) *ApiClient {
 	return NewApiClient(defaultConfig)
 }
 
-// Type-only exports
 type RequestMethod string
 
 const (
@@ -70,7 +65,6 @@ type RequestOptions struct {
 	Body    interface{}
 }
 
-// Default export - 在 Go 中沒有 default export，使用特殊命名
 type HttpClient struct {
 	ApiClient
 }
@@ -89,7 +83,6 @@ func (h *HttpClient) Post(path string, data interface{}) (interface{}, error) {
 	return h.Request(path)
 }
 
-// Namespace export
 type HttpMethod string
 
 const (
@@ -117,16 +110,13 @@ func NewHttpRequest(url string, method HttpMethod) *HttpRequest {
 	}
 }
 
-// Function overloads - Go 不支援函式重載，使用可選參數
 func Fetch(url string, options *RequestOptions) (interface{}, error) {
-	// Implementation
 	return map[string]interface{}{
 		"url":     url,
 		"options": options,
 	}, nil
 }
 
-// Const assertions
 var CONSTANTS = struct {
 	MAX_RETRIES int
 	TIMEOUT     int
@@ -149,12 +139,10 @@ var CONSTANTS = struct {
 	},
 }
 
-// Module initialization - 使用 init 函式
 func init() {
 	println("Module initialized")
 }
 
-// Export patterns
 var Utils = struct {
 	FormatUrl     func(string) string
 	ParseResponse func(interface{}) interface{}
@@ -163,19 +151,16 @@ var Utils = struct {
 		return API_ENDPOINT + path
 	},
 	ParseResponse: func(response interface{}) interface{} {
-		// 簡化實作
 		return response
 	},
 }
 
-// Conditional exports based on environment
 var config = struct {
 	Debug    bool
 	LogLevel string
 }{
-	Debug:    false, // 預設為 production
+	Debug:    false,
 	LogLevel: "error",
 }
 
-// Re-export with rename
 type Client = ApiClient

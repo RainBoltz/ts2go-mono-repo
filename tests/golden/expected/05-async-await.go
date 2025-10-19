@@ -1,5 +1,3 @@
-// Generated from: 05-async-await.ts
-
 package main
 
 import (
@@ -8,14 +6,11 @@ import (
 	"time"
 )
 
-// 基本 async function - 轉換為返回 error 的同步函式
 func FetchData(ctx context.Context, url string) (string, error) {
-	// 模擬 HTTP 請求
 	time.Sleep(100 * time.Millisecond)
 	return fmt.Sprintf("Data from %s", url), nil
 }
 
-// async/await 與錯誤處理
 func FetchWithRetry(ctx context.Context, url string, maxRetries int) (string, error) {
 	if maxRetries == 0 {
 		maxRetries = 3
@@ -38,7 +33,6 @@ func FetchWithRetry(ctx context.Context, url string, maxRetries int) (string, er
 	return "", fmt.Errorf("Max retries exceeded")
 }
 
-// 並行執行 - 使用 goroutines
 func FetchMultiple(ctx context.Context, urls []string) ([]string, error) {
 	results := make([]string, len(urls))
 	errs := make(chan error, len(urls))
@@ -56,11 +50,9 @@ func FetchMultiple(ctx context.Context, urls []string) ([]string, error) {
 		}(i, url)
 	}
 
-	// 等待所有完成
 	for i := 0; i < len(urls); i++ {
 		select {
 		case <-done:
-			// 成功
 		case err := <-errs:
 			return nil, err
 		case <-ctx.Done():
@@ -71,7 +63,6 @@ func FetchMultiple(ctx context.Context, urls []string) ([]string, error) {
 	return results, nil
 }
 
-// Promise.race - 返回第一個完成的結果
 func FetchFirstAvailable(ctx context.Context, urls []string) (string, error) {
 	result := make(chan string, 1)
 	errs := make(chan error, len(urls))
@@ -100,7 +91,6 @@ func FetchFirstAvailable(ctx context.Context, urls []string) (string, error) {
 	}
 }
 
-// async 方法在類別中
 type DataService struct {
 	cache map[string]string
 }
@@ -130,7 +120,6 @@ func (d *DataService) ClearCache(ctx context.Context) error {
 	return nil
 }
 
-// async arrow function
 var ProcessAsync = func(ctx context.Context, input string) (int, error) {
 	result, err := FetchData(ctx, input)
 	if err != nil {
@@ -139,7 +128,6 @@ var ProcessAsync = func(ctx context.Context, input string) (int, error) {
 	return len(result), nil
 }
 
-// Promise chain 轉換
 func FetchAndProcess(ctx context.Context, url string) (int, error) {
 	data, err := FetchData(ctx, url)
 	if err != nil {
@@ -147,14 +135,11 @@ func FetchAndProcess(ctx context.Context, url string) (int, error) {
 		return 0, nil
 	}
 
-	// 相當於 .then(data => data.toUpperCase())
-	upperData := data // 在 Go 中需要使用 strings.ToUpper(data)
+	upperData := data
 
-	// 相當於 .then(data => data.length)
 	return len(upperData), nil
 }
 
-// async generator - 使用 channel
 func GenerateData(ctx context.Context, count int) <-chan int {
 	ch := make(chan int)
 	go func() {
@@ -171,7 +156,6 @@ func GenerateData(ctx context.Context, count int) <-chan int {
 	return ch
 }
 
-// 使用 async generator
 func ConsumeGenerator(ctx context.Context) ([]int, error) {
 	results := make([]int, 0)
 	for value := range GenerateData(ctx, 5) {
@@ -180,7 +164,6 @@ func ConsumeGenerator(ctx context.Context) ([]int, error) {
 	return results, nil
 }
 
-// Promise 工具函式
 func Delay(ctx context.Context, ms int) error {
 	select {
 	case <-time.After(time.Duration(ms) * time.Millisecond):

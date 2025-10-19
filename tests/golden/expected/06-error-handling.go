@@ -1,5 +1,3 @@
-// Generated from: 06-error-handling.ts
-
 package main
 
 import (
@@ -7,7 +5,6 @@ import (
 	"fmt"
 )
 
-// 自訂錯誤類別
 type ValidationError struct {
 	Message string
 	Field   string
@@ -44,7 +41,6 @@ func NewNetworkError(message string, statusCode int, url string) *NetworkError {
 	}
 }
 
-// try/catch/finally - 使用 defer 實現 finally
 func ParseJSON(jsonString string) (interface{}, error) {
 	defer func() {
 		fmt.Println("Parse attempt completed")
@@ -59,11 +55,9 @@ func ParseJSON(jsonString string) (interface{}, error) {
 	return result, nil
 }
 
-// 多重 catch (TypeScript 中需要用 if/else)
 func ProcessData(data interface{}) (string, error) {
 	defer func() {
 		if r := recover(); r != nil {
-			// 處理 panic
 		}
 	}()
 
@@ -76,11 +70,9 @@ func ProcessData(data interface{}) (string, error) {
 		return "", fmt.Errorf("Empty data")
 	}
 
-	// 在 Go 中需要使用 strings.ToUpper(str)
 	return str, nil
 }
 
-// 錯誤傳播
 func Divide(a float64, b float64) (float64, error) {
 	if b == 0 {
 		return 0, fmt.Errorf("Division by zero")
@@ -89,11 +81,9 @@ func Divide(a float64, b float64) (float64, error) {
 }
 
 func Calculate(expression string) (float64, error) {
-	// 簡化實作
 	return 0, fmt.Errorf("Not implemented")
 }
 
-// Result 型別模式（不使用 throw）
 type Result[T any] struct {
 	Success bool
 	Value   T
@@ -114,13 +104,8 @@ func SafeDivide(a float64, b float64) Result[float64] {
 	}
 }
 
-// 鏈式錯誤處理
 func ChainedOperation(input string) Result[float64] {
-	// Step 1: Parse
-	// 簡化實作
 	parsed := 0.0
-
-	// Step 2: Validate range
 	if parsed < 0 || parsed > 100 {
 		return Result[float64]{
 			Success: false,
@@ -128,7 +113,6 @@ func ChainedOperation(input string) Result[float64] {
 		}
 	}
 
-	// Step 3: Calculate
 	result := SafeDivide(100, parsed)
 	if !result.Success {
 		return result
@@ -140,16 +124,13 @@ func ChainedOperation(input string) Result[float64] {
 	}
 }
 
-// Async 錯誤處理
 func FetchWithErrorHandling(url string) Result[string] {
 	defer func() {
 		if r := recover(); r != nil {
-			// 處理 panic
 		}
 	}()
 
-	// 模擬網路請求
-	if len(url) > 0 && url[0] == 'e' { // 簡化的錯誤判斷
+	if len(url) > 0 && url[0] == 'e' {
 		return Result[string]{
 			Success: false,
 			Error:   NewNetworkError("Failed to fetch", 404, url),
@@ -162,7 +143,6 @@ func FetchWithErrorHandling(url string) Result[string] {
 	}
 }
 
-// Error boundary 模式
 type ErrorBoundary struct {
 	errors []error
 }

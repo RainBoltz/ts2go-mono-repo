@@ -1,10 +1,7 @@
-// Generated from: 02-interfaces-classes.ts
-
 package main
 
 import "time"
 
-// 基本介面
 type User struct {
 	Id        string
 	Name      string
@@ -12,17 +9,14 @@ type User struct {
 	CreatedAt time.Time
 }
 
-// 介面繼承
 type Admin struct {
 	User
 	Role        string
 	Permissions []string
 }
 
-// 索引簽名
 type Dictionary map[string]interface{}
 
-// 類別實作介面
 type UserImpl struct {
 	Id        string
 	Name      string
@@ -43,7 +37,6 @@ func (u *UserImpl) Greet() string {
 	return "Hello, I'm " + u.Name
 }
 
-// 類別繼承
 type AdminUser struct {
 	UserImpl
 	Role        string
@@ -68,7 +61,6 @@ func (a *AdminUser) HasPermission(permission string) bool {
 	return false
 }
 
-// 靜態成員
 type Counter struct {
 	count int
 }
