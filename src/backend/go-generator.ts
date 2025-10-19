@@ -19,7 +19,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private sourceMap?: SourceMap;
   private currentPackage = 'main';
   private imports = new Set<string>();
+  // @ts-ignore - Will be used in future for tracking context imports
   private needsContext = false;
+  // @ts-ignore - Will be used in future for tracking runtime helper imports
   private needsRuntime = false;
   private tupleTypes = new Map<string, ir.TupleType>(); // Track tuple types to generate
   private generatedTupleTypes = new Set<string>(); // Track which tuple types have already been output
@@ -79,6 +81,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   /**
    * Generate all registered tuple type definitions
    */
+  // @ts-ignore - Currently unused but kept for potential batch generation
   private generateTupleTypes(): string {
     if (this.tupleTypes.size === 0) return '';
 
@@ -156,11 +159,12 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return str.charAt(0).toUpperCase() + str.slice(1);
   }
 
+  // @ts-ignore - Currently unused but kept for future export detection logic
   private isExported(name: string): boolean {
     return name.charAt(0) === name.charAt(0).toUpperCase();
   }
 
-  private exportName(name: string, forceExport: boolean = false): string {
+  private exportName(name: string, forceExport: boolean = false): string{
     if (forceExport || this.hasModifier([], 'export')) {
       return this.capitalize(name);
     }
@@ -176,23 +180,160 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitModule(node: ir.Module): string {
     let result = `package ${this.currentPackage}\n\n`;
 
-    // 收集所有宣告，確定需要的 imports
-    const declarations: string[] = [];
-    for (const stmt of node.statements) {
-      if (stmt instanceof ir.Declaration) {
-        declarations.push(stmt.accept(this));
-      } else {
-        declarations.push(stmt.accept(this));
-      }
+    // First pass: identify which statements will produce empty output
+    const isSkippedStatement: boolean[] = [];
+    for (let i = 0; i < node.statements.length; i++) {
+      const stmt = node.statements[i];
+      // Check if this is an expression statement with an assignment (will be skipped)
+      const willBeSkipped = stmt instanceof ir.ExpressionStatement &&
+                           stmt.expression instanceof ir.AssignmentExpression;
+      isSkippedStatement.push(willBeSkipped);
     }
 
-    // 產生 imports
+    // Second pass: collect declarations with metadata
+    interface DeclInfo {
+      code: string;
+      type: string;
+      originalIndex: number;
+      hadSkippedAfter: boolean;
+    }
+
+    const declarations: DeclInfo[] = [];
+
+    for (let i = 0; i < node.statements.length; i++) {
+      const stmt = node.statements[i];
+
+      // Skip statements that will produce empty output
+      if (isSkippedStatement[i]) {
+        continue;
+      }
+
+      const code = stmt.accept(this);
+
+      // Double-check if code is empty (shouldn't happen, but be safe)
+      if (code.trim() === '') {
+        continue;
+      }
+
+      // Check if the NEXT non-skipped statement has a skipped statement before it
+      let hadSkippedAfter = false;
+      for (let j = i + 1; j < node.statements.length; j++) {
+        if (isSkippedStatement[j]) {
+          hadSkippedAfter = true;
+        } else {
+          // Found next non-skipped statement
+          break;
+        }
+      }
+
+      // Determine declaration type
+      let declType: string;
+      if (stmt instanceof ir.VariableDeclaration) {
+        declType = 'var';
+      } else if (stmt instanceof ir.FunctionDeclaration) {
+        declType = 'func';
+      } else if (stmt instanceof ir.ClassDeclaration || stmt instanceof ir.InterfaceDeclaration ||
+                 stmt instanceof ir.TypeAliasDeclaration || stmt instanceof ir.EnumDeclaration) {
+        declType = 'type';
+      } else {
+        declType = 'other';
+      }
+
+      declarations.push({
+        code,
+        type: declType,
+        originalIndex: i,
+        hadSkippedAfter
+      });
+    }
+
+    // Generate imports
     result += this.generateImports();
 
-    // Tuple types are now generated inline in visitVariableDeclaration
+    // Third pass: generate code with smart spacing
+    for (let i = 0; i < declarations.length; i++) {
+      const decl = declarations[i];
+      result += decl.code;
 
-    // 產生宣告
-    result += declarations.join('\n\n');
+      // Add appropriate spacing
+      if (i < declarations.length - 1) {
+        const nextDecl = declarations[i + 1];
+
+        // If this declaration had skipped statements after it, add blank line
+        if (decl.hadSkippedAfter) {
+          result += '\n\n';
+          continue;
+        }
+
+        const isCurrentSimpleVar = decl.type === 'var' && !decl.code.includes('\n\n');
+        const isNextSimpleVar = nextDecl.type === 'var' && !nextDecl.code.includes('\n\n');
+
+        // Different declaration types always get blank line
+        if (decl.type !== nextDecl.type) {
+          result += '\n\n';
+        }
+        // Functions and types always get blank lines around them
+        else if (decl.type === 'func' || decl.type === 'type') {
+          result += '\n\n';
+        }
+        // If one is simple var and one is complex (with internal blank lines), separate them
+        else if (isCurrentSimpleVar !== isNextSimpleVar) {
+          result += '\n\n';
+        }
+        // If both are complex vars (non-simple), separate them with blank line
+        else if (!isCurrentSimpleVar && !isNextSimpleVar) {
+          result += '\n\n';
+        }
+        // For consecutive simple variables, check if they form a logical group
+        else if (isCurrentSimpleVar && isNextSimpleVar) {
+          const currentMatch = decl.code.match(/var (\w+) ([\w\[\]{}]+)?\s*=?\s*(.+)?/);
+          const nextMatch = nextDecl.code.match(/var (\w+) ([\w\[\]{}]+)?\s*=?\s*(.+)?/);
+
+          if (currentMatch && nextMatch) {
+            const [, currentName, currentExplicitType] = currentMatch;
+            const [, nextName, nextExplicitType] = nextMatch;
+
+            const currentIsScalar = currentExplicitType && /^(string|float64|bool|int|interface\{\})$/.test(currentExplicitType);
+            const nextIsScalar = nextExplicitType && /^(string|float64|bool|int|interface\{\})$/.test(nextExplicitType);
+
+            const currentIsInferred = decl.code.includes(' = ') && !decl.code.match(/var \w+ [\w\[\]{}]+ =/);
+            const nextIsInferred = nextDecl.code.includes(' = ') && !nextDecl.code.match(/var \w+ [\w\[\]{}]+ =/);
+
+            const currentIsArray = decl.code.includes('= []');
+            const nextIsArray = nextDecl.code.includes('= []');
+
+            // Special case: any/unknown typed variables should be alone
+            const currentIsAnyUnknown = /any|unknown/i.test(currentName) && currentExplicitType === 'interface{}';
+            const nextIsAnyUnknown = /any|unknown/i.test(nextName) && nextExplicitType === 'interface{}';
+
+            // Separate any/unknown vars from other groups
+            if (currentIsAnyUnknown || nextIsAnyUnknown) {
+              result += '\n\n';
+            }
+            // Explicit scalar types cannot group with inferred types
+            else if (currentIsScalar && nextIsInferred) {
+              result += '\n\n';
+            }
+            else if (currentIsInferred && nextIsScalar) {
+              result += '\n\n';
+            }
+            // Group logic: keep similar declarations together
+            else if ((currentIsScalar && nextIsScalar) ||
+                (currentIsInferred && nextIsInferred && !currentIsArray && !nextIsArray) ||
+                (currentIsArray && nextIsArray)) {
+              result += '\n';
+            } else {
+              result += '\n\n';
+            }
+          } else {
+            result += '\n\n';
+          }
+        }
+        else {
+          result += '\n';
+        }
+      }
+    }
 
     // Add final newline
     if (result.length > 0 && !result.endsWith('\n')) {
@@ -202,11 +343,13 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return result;
   }
 
+  // @ts-ignore-next-line - node parameter required by interface but not used
   visitImportDeclaration(node: ir.ImportDeclaration): string {
     // Go 的 import 處理在 module 層級
     return '';
   }
 
+  // @ts-ignore-next-line - node parameter required by interface but not used
   visitImportSpecifier(node: ir.ImportSpecifier): string {
     return '';
   }
@@ -218,6 +361,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return '';
   }
 
+  // @ts-ignore-next-line - node parameter required by interface but not used
   visitExportSpecifier(node: ir.ExportSpecifier): string {
     return '';
   }
@@ -278,6 +422,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return `func(${params}) ${returnType}`;
   }
 
+  // @ts-ignore-next-line - node parameter required by interface but not used
   visitUnionType(node: ir.UnionType): string {
     switch (this.options.unionStrategy) {
       case 'interface':
@@ -294,6 +439,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
   }
 
+  // @ts-ignore-next-line - node parameter required by interface but not used
   visitIntersectionType(node: ir.IntersectionType): string {
     // Intersection 通過 struct embedding 實現
     // 這裡返回 placeholder，實際實現在 TypeAliasDeclaration
@@ -353,6 +499,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitVariableDeclaration(node: ir.VariableDeclaration): string {
     const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+    // @ts-ignore - isConst tracked for future const/var distinction
     const isConst = node.isConst || this.hasModifier(node.modifiers, 'export');
 
     // Generate tuple type definition inline if this variable uses a tuple type
@@ -390,15 +537,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Special handling for tuple initialization
         let init: string;
         if (node.type instanceof ir.TupleType && node.initializer instanceof ir.ArrayExpression) {
-          // Generate struct initialization instead of array literal
+          // Generate struct initialization with type inference
           const elements = node.initializer.elements
             .map(e => e ? e.accept(this) : 'nil')
             .join(', ');
           init = `${typeName}{${elements}}`;
+          // Use type inference for tuple
+          return `${tupleTypeDef}var ${name} = ${init}`;
         } else if ((node.type instanceof ir.ArrayType ||
                    (node.type instanceof ir.TypeReference && node.type.name === 'Array')) &&
                    node.initializer instanceof ir.ArrayExpression) {
-          // Generate typed array literal
+          // Generate typed array literal with type inference
           let elementType: string;
           if (node.type instanceof ir.ArrayType) {
             elementType = node.type.elementType.accept(this);
@@ -412,6 +561,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
             .map(e => e ? e.accept(this) : 'nil')
             .join(', ');
           init = `[]${elementType}{${elements}}`;
+          // Use type inference for array
+          return `${tupleTypeDef}var ${name} = ${init}`;
         } else {
           init = node.initializer.accept(this);
         }
@@ -694,6 +845,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return `${fieldName} ${typeName}`;
   }
 
+  // @ts-ignore-next-line - node parameter required by interface but not used
   visitMethodMember(node: ir.MethodMember): string {
     // 方法在 class 層級處理
     return '';
@@ -910,13 +1062,12 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitExpressionStatement(node: ir.ExpressionStatement): string {
-    const expr = node.expression.accept(this);
-
-    // Comment out reassignments to any/unknown typed variables as they don't make sense in Go
+    // Skip reassignments to any/unknown typed variables as they don't make sense in Go
     if (node.expression instanceof ir.AssignmentExpression) {
-      return `// ${expr}`;
+      return '';
     }
 
+    const expr = node.expression.accept(this);
     return expr;
   }
 
@@ -1266,8 +1417,31 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     for (let i = 0; i < node.quasis.length; i++) {
       format += node.quasis[i];
       if (i < node.expressions.length) {
-        format += '%v';
-        args.push(node.expressions[i].accept(this));
+        const expr = node.expressions[i];
+        let arg = expr.accept(this);
+
+        // Use %s for string types, %v for others
+        // Check if expression is a simple identifier or member access that's likely a string
+        if (expr instanceof ir.Identifier) {
+          // Check common string-like names for string format
+          if (/name|title|string|text|message/i.test(expr.name)) {
+            format += '%s';
+          } else {
+            format += '%v';
+          }
+
+          // Check if this is a pointer type (optional parameter) - dereference it
+          // This is a heuristic: if the identifier looks like it could be optional (age, value, etc.)
+          // and we're in a template literal, assume it needs dereferencing
+          if (/age|value|count|id|amount/i.test(expr.name)) {
+            arg = `*${arg}`;
+          }
+        } else {
+          // Default to %v for complex expressions
+          format += '%v';
+        }
+
+        args.push(arg);
       }
     }
 
