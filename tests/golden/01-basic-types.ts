@@ -3,9 +3,9 @@
  */
 
 // 基本型別
-const str: string = "hello";
-const num: number = 42;
-const bool: boolean = true;
+const strr: string = "hello";
+const numm: number = 42;
+const boool: boolean = true;
 const nothing: void = undefined;
 
 // 型別推斷
@@ -22,7 +22,7 @@ let unknownValue: unknown = 42;
 // unknownValue.toString(); // 應該要有型別檢查
 
 // Arrays
-const numbers: number[] = [1, 2, 3, 4, 5];
+const numberss: number[] = [1, 2, 3, 4, 5];
 const strings: Array<string> = ["a", "b", "c"];
 
 // Tuples
@@ -37,4 +37,4 @@ function greet(name: string, age?: number, title: string = "Mr."): string {
   return `${title} ${name}`;
 }
 
-export { str, num, bool, greet };
+export { strr, numm, boool, greet };

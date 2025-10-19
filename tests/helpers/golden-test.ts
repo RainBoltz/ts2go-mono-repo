@@ -5,6 +5,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 import { Compiler } from '../../src/compiler/compiler';
 import { CompilerOptions, defaultOptions } from '../../src/config/options';
 
@@ -25,6 +26,39 @@ export class GoldenTestRunner {
   ) {
     this.goldenDir = goldenDir;
     this.expectedDir = expectedDir;
+  }
+
+  /**
+   * Run go vet on a Go source file
+   */
+  private runGoVet(code: string, testName: string): { passed: boolean; errors: string[] } {
+    const tmpFile = path.join('/tmp', `${testName}.go`);
+    const errors: string[] = [];
+
+    try {
+      fs.writeFileSync(tmpFile, code, 'utf-8');
+
+      try {
+        execSync(`go vet ${tmpFile}`, { encoding: 'utf-8', stdio: 'pipe' });
+        return { passed: true, errors: [] };
+      } catch (error: any) {
+        const stderr = error.stderr || error.stdout || error.message;
+        errors.push(`go vet failed:\n${stderr}`);
+        return { passed: false, errors };
+      }
+    } catch (error: any) {
+      errors.push(`Failed to write temp file: ${error.message}`);
+      return { passed: false, errors };
+    } finally {
+      // Clean up temp file
+      try {
+        if (fs.existsSync(tmpFile)) {
+          fs.unlinkSync(tmpFile);
+        }
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
   }
 
   /**
@@ -59,6 +93,30 @@ export class GoldenTestRunner {
     }
 
     const generatedCode = typeof result.output === 'string' ? result.output : '';
+
+    // Run go vet on expected code
+    const expectedVet = this.runGoVet(expectedCode, `expected-${testCase.name}`);
+    if (!expectedVet.passed) {
+      return {
+        passed: false,
+        name: testCase.name,
+        errors: [`Expected code failed go vet:`, ...expectedVet.errors],
+        expected: expectedCode,
+        actual: generatedCode
+      };
+    }
+
+    // Run go vet on actual code
+    const actualVet = this.runGoVet(generatedCode, `actual-${testCase.name}`);
+    if (!actualVet.passed) {
+      return {
+        passed: false,
+        name: testCase.name,
+        errors: [`Generated code failed go vet:`, ...actualVet.errors],
+        expected: expectedCode,
+        actual: generatedCode
+      };
+    }
 
     // 比對生成的程式碼與預期的程式碼
     const comparison = this.compareCode(generatedCode, expectedCode);
@@ -135,13 +193,32 @@ export class GoldenTestRunner {
 
   /**
    * 正規化程式碼（用於比對）
+   * - Preserves indentation (leading tabs/spaces)
+   * - Ignores padding (multiple spaces between tokens are normalized to single space)
+   * - Removes trailing whitespace
+   * - Collapses consecutive blank lines to single blank line (formatting difference)
    */
   private normalizeCode(code: string): string {
     return code
       .split('\n')
-      .map(line => line.trimEnd()) // 移除行尾空白
-      .filter(line => line.length > 0 || true) // 保留空行
+      .map(line => {
+        // Extract leading whitespace (indentation)
+        const indentMatch = line.match(/^(\s*)/);
+        const indent = indentMatch ? indentMatch[1] : '';
+
+        // Get the rest of the line after indentation
+        const content = line.slice(indent.length);
+
+        // Normalize multiple spaces to single space in content (ignores padding)
+        // But preserve the content structure
+        const normalized = content.trimEnd().replace(/\s+/g, ' ');
+
+        // Reconstruct: indent + normalized content
+        return indent + normalized;
+      })
+      // Collapse consecutive blank lines to single blank line
       .join('\n')
+      .replace(/\n\n\n+/g, '\n\n')
       .trim();
   }
 
@@ -240,7 +317,7 @@ export async function runGoldenTest(
       ...(result.diff || []),
       '',
       'Errors:',
-      ...(result.errors || []).map(e => `  ${e.message}`)
+      ...(result.errors || []).map(e => typeof e === 'string' ? `  ${e}` : `  ${e?.message || JSON.stringify(e)}`)
     ].join('\n');
 
     throw new Error(errorMessage);

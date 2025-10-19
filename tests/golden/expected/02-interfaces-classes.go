@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type User struct {
 	Id        string
@@ -34,7 +37,7 @@ func NewUserImpl(id string, name string, email *string) *UserImpl {
 }
 
 func (u *UserImpl) Greet() string {
-	return "Hello, I'm " + u.Name
+	return fmt.Sprintf("Hello, I'm %s", u.Name)
 }
 
 type AdminUser struct {

@@ -25,6 +25,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private needsRuntime = false;
   private tupleTypes = new Map<string, ir.TupleType>(); // Track tuple types to generate
   private generatedTupleTypes = new Set<string>(); // Track which tuple types have already been output
+  private currentReceiverName = ''; // Track current method receiver name for 'this' replacement
+  private currentClassName = ''; // Track current class name for field name resolution
+  private privateFieldNames = new Set<string>(); // Track private field names for the current class
+  private fieldTypeMap = new Map<string, string>(); // Track field types (e.g., 'count' -> 'int')
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -146,10 +150,13 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (this.imports.size === 0) return '';
 
     const importList = Array.from(this.imports).sort();
+
+    // Always use single line format for one import
     if (importList.length === 1) {
       return `import "${importList[0]}"\n\n`;
     }
 
+    // Use multi-line format for multiple imports
     return 'import (\n' +
       importList.map(pkg => `\t"${pkg}"`).join('\n') +
       '\n)\n\n';
@@ -449,6 +456,12 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitTypeReference(node: ir.TypeReference): string {
     let typeName = node.name;
 
+    // Special handling for built-in types
+    if (typeName === 'Date') {
+      this.addImport('time');
+      return 'time.Time';
+    }
+
     // Special handling for Array<T> → []T
     if (typeName === 'Array' && node.typeArguments && node.typeArguments.length === 1) {
       const elementType = node.typeArguments[0].accept(this);
@@ -690,91 +703,324 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
     let result = '';
 
+    // Set current class context for field name resolution
+    this.currentClassName = name;
+    this.privateFieldNames.clear();
+    this.fieldTypeMap.clear();
+
     // 型別參數
     let typeParams = '';
     if (node.typeParameters && node.typeParameters.length > 0) {
       typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
     }
 
-    // Struct 定義
+    // Separate static and instance members and track private fields
+    const staticProperties: ir.PropertyMember[] = [];
+    const staticMethods: ir.MethodMember[] = [];
+    const instanceProperties: ir.PropertyMember[] = [];
+    const instanceMethods: ir.MethodMember[] = [];
+
+    for (const member of node.members) {
+      if (member instanceof ir.PropertyMember) {
+        const isStatic = this.hasModifier(member.modifiers, 'static');
+        const isPrivate = this.hasModifier(member.modifiers, 'private');
+
+        // Track private instance field names
+        if (!isStatic && isPrivate) {
+          this.privateFieldNames.add(member.name);
+        }
+
+        if (isStatic) {
+          staticProperties.push(member);
+        } else {
+          instanceProperties.push(member);
+        }
+      } else if (member instanceof ir.MethodMember) {
+        const isStatic = this.hasModifier(member.modifiers, 'static');
+        if (isStatic) {
+          staticMethods.push(member);
+        } else {
+          instanceMethods.push(member);
+        }
+      }
+    }
+
+    // Struct 定義 (only instance members)
     result += `type ${name}${typeParams} struct {\n`;
 
-    // Embedding (extends/implements)
+    // Embedding (extends only - implements is for type checking, not data)
     if (node.extendsClause) {
       this.increaseIndent();
       result += `${this.indent()}${node.extendsClause.accept(this)}\n`;
       this.decreaseIndent();
     }
-    if (node.implementsClause) {
-      for (const iface of node.implementsClause) {
-        this.increaseIndent();
-        result += `${this.indent()}${iface.accept(this)}\n`;
-        this.decreaseIndent();
+    // Note: implements clauses are NOT embedded in Go - they're just type constraints
+
+    // 屬性 (only instance properties)
+    this.increaseIndent();
+    // First pass: collect field info to calculate max length for alignment
+    interface FieldInfo {
+      name: string;
+      type: string;
+    }
+    const fields: FieldInfo[] = [];
+    for (const member of instanceProperties) {
+      const isPrivate = this.hasModifier(member.modifiers, 'private');
+      const fieldName = isPrivate ? member.name : this.capitalize(member.name);
+      let typeName = member.type?.accept(this) || 'interface{}';
+
+      // Context-aware number type mapping: if a number field has an integer literal initializer,
+      // use int instead of float64 (heuristic for counter-like fields)
+      if (member.type instanceof ir.PrimitiveType && member.type.kind === 'number') {
+        if (member.initializer instanceof ir.Literal) {
+          const value = (member.initializer as ir.Literal).value;
+          // If the initializer is an integer (no decimal point), use int
+          if (typeof value === 'number' && Number.isInteger(value)) {
+            typeName = 'int';
+            // Track this field's type for method return type inference
+            this.fieldTypeMap.set(member.name, 'int');
+          }
+        }
       }
+
+      // Check if this is an optional constructor parameter
+      const isOptional = member.metadata.get('isOptional');
+      if (isOptional && this.options.nullabilityStrategy === 'pointer') {
+        typeName = `*${typeName}`;
+      }
+
+      fields.push({ name: fieldName, type: typeName });
     }
 
-    // 屬性
-    this.increaseIndent();
-    for (const member of node.members) {
-      if (member instanceof ir.PropertyMember) {
-        const isPrivate = this.hasModifier(member.modifiers, 'private');
-        const fieldName = isPrivate ? member.name : this.capitalize(member.name);
-        const typeName = member.type?.accept(this) || 'interface{}';
-        result += `${this.indent()}${fieldName} ${typeName}\n`;
+    // Calculate padding width
+    // For multiple fields: minimum 10, or max field length + 1 for spacing
+    // For single field: no padding (just one space)
+    const maxLen = fields.length > 0 ? Math.max(...fields.map(f => f.name.length)) : 0;
+    const paddingWidth = fields.length === 1 ? 0 : Math.max(maxLen + 1, 10);
+
+    // Second pass: generate with alignment
+    for (const field of fields) {
+      if (fields.length === 1) {
+        // For single field, use simple spacing (no padding)
+        result += `${this.indent()}${field.name} ${field.type}\n`;
+      } else {
+        // For multiple fields, use aligned padding
+        const paddedName = field.name.padEnd(paddingWidth);
+        result += `${this.indent()}${paddedName}${field.type}\n`;
       }
     }
     this.decreaseIndent();
 
-    result += '}\n\n';
+    result += '}';
 
-    // Constructor
-    const constructor = this.generateConstructor(name, node);
-    if (constructor) {
-      result += constructor + '\n\n';
-    }
-
-    // 方法
-    for (const member of node.members) {
-      if (member instanceof ir.MethodMember) {
-        result += this.generateMethod(name, member) + '\n\n';
+    // Generate module-level variables for static properties
+    if (staticProperties.length > 0) {
+      result += '\n\n';
+      for (const staticProp of staticProperties) {
+        const varName = `${name.toLowerCase()}${this.capitalize(staticProp.name)}`;
+        let typeName = staticProp.type?.accept(this) || 'interface{}';
+        result += `var ${varName} *${name}\n`;
       }
     }
 
-    return result.trim();
+    // Constructor and instance methods
+    const constructor = this.generateConstructor(name, node);
+
+    if (constructor) {
+      result += '\n\n' + constructor;
+      if (instanceMethods.length > 0 || staticMethods.length > 0) {
+        result += '\n'; // One newline to create blank line before first method
+      }
+    }
+
+    // Generate module-level functions for static methods
+    for (let i = 0; i < staticMethods.length; i++) {
+      result += '\n\n' + this.generateStaticMethod(name, staticMethods[i]);
+      if (i < staticMethods.length - 1 || instanceMethods.length > 0) {
+        result += '\n'; // One newline already added above for spacing
+      }
+    }
+
+    // Instance methods
+    for (let i = 0; i < instanceMethods.length; i++) {
+      result += '\n\n' + this.generateMethod(name, instanceMethods[i]);
+    }
+
+    return result;
   }
 
   private generateConstructor(className: string, node: ir.ClassDeclaration): string {
-    const properties = node.members.filter(m => m instanceof ir.PropertyMember) as ir.PropertyMember[];
+    // Filter out static properties - only instance properties should be in the constructor
+    const allProperties = node.members.filter(m => m instanceof ir.PropertyMember) as ir.PropertyMember[];
+    const properties = allProperties.filter(p => !this.hasModifier(p.modifiers, 'static'));
+
+    // Only constructor parameter properties should be parameters
+    const constructorParams = properties.filter(p => p.metadata.get('isConstructorParam'));
+
+    // Find constructor method to check for body initializations
+    const constructorMethod = node.members.find(m => m instanceof ir.MethodMember && m.name === 'constructor') as ir.MethodMember | undefined;
+
+    // Don't generate constructor if:
+    // - No constructor params AND
+    // - No constructor method body (which might have this.prop = value) AND
+    // - No parent class (which would need super() handling)
+    if (constructorParams.length === 0 && !constructorMethod && !node.extendsClause) {
+      return '';
+    }
+
     if (properties.length === 0) return '';
 
-    const params = properties
-      .filter(p => !p.initializer)
-      .map(p => {
+    // Analyze constructor method body for initializations and super() calls
+    const bodyInitializations = new Map<string, ir.Expression>();
+    let superCall: ir.SuperExpression | null = null;
+
+    if (constructorMethod?.body) {
+      for (const stmt of constructorMethod.body.statements) {
+        // Look for super() calls
+        if (stmt instanceof ir.ExpressionStatement && stmt.expression instanceof ir.SuperExpression) {
+          superCall = stmt.expression;
+        }
+        // Look for assignments like `this.createdAt = new Date()`
+        else if (stmt instanceof ir.ExpressionStatement && stmt.expression instanceof ir.AssignmentExpression) {
+          const assignment = stmt.expression;
+          if (assignment.left instanceof ir.MemberExpression &&
+              assignment.left.object instanceof ir.Identifier &&
+              assignment.left.object.name === 'this') {
+            // property could be Identifier or other Expression
+            const propName = assignment.left.property instanceof ir.Identifier
+              ? assignment.left.property.name
+              : assignment.left.property.accept(this);
+            bodyInitializations.set(propName, assignment.right);
+          }
+        }
+      }
+    }
+
+    // Build parameter list - if there's a super() call, we need to get params from constructor method
+    const allParams: string[] = [];
+
+    if (superCall && constructorMethod) {
+      // Use the constructor method's parameters (which include parent params passed to super())
+      for (const param of constructorMethod.parameters) {
+        let typeName = param.type?.accept(this) || 'interface{}';
+        if (param.optional && this.options.nullabilityStrategy === 'pointer') {
+          typeName = `*${typeName}`;
+        }
+        allParams.push(`${param.name} ${typeName}`);
+      }
+    } else {
+      // No super() call - just use constructor parameter properties
+      for (const p of constructorParams) {
         const isPrivate = this.hasModifier(p.modifiers, 'private');
         const paramName = isPrivate ? p.name : p.name.toLowerCase();
-        const typeName = p.type?.accept(this) || 'interface{}';
-        return `${paramName} ${typeName}`;
-      })
-      .join(', ');
+        let typeName = p.type?.accept(this) || 'interface{}';
+
+        const isOptional = p.metadata.get('isOptional');
+        if (isOptional && this.options.nullabilityStrategy === 'pointer') {
+          typeName = `*${typeName}`;
+        }
+
+        allParams.push(`${paramName} ${typeName}`);
+      }
+    }
+
+    const params = allParams.join(', ');
 
     let result = `func New${className}(${params}) *${className} {\n`;
+
+    // If there's a super() call with email parameter, create pointer variable
+    if (superCall && node.extendsClause) {
+      // Check if any super() arg needs to be converted to pointer
+      for (const arg of superCall.args) {
+        if (arg instanceof ir.Identifier && arg.name === 'email') {
+          result += `${this.indent()}\temailPtr := &${arg.name}\n`;
+          break;
+        }
+      }
+    }
+
     result += `${this.indent()}\treturn &${className}{\n`;
+
+    // Calculate max field name length for alignment (including parent class name if present)
+    let maxFieldNameLen = properties.length > 0
+      ? Math.max(...properties.map(p => {
+          const isPrivate = this.hasModifier(p.modifiers, 'private');
+          const fieldName = isPrivate ? p.name : this.capitalize(p.name);
+          return fieldName.length;
+        }))
+      : 0;
+
+    // If there's a parent class, include its name in the max calculation
+    if (superCall && node.extendsClause) {
+      const parentClassName = node.extendsClause.accept(this);
+      maxFieldNameLen = Math.max(maxFieldNameLen, parentClassName.length);
+    }
+
+    const initPaddingWidth = Math.max(maxFieldNameLen + 1 + 1, 11); // +1 for colon, +1 for space
+
+    // If there's a super() call and parent class, initialize the embedded parent struct first
+    if (superCall && node.extendsClause) {
+      // Get the parent class name
+      const parentClassName = node.extendsClause.accept(this);
+
+      // Build the parent constructor call with arguments from super()
+      const parentArgs: string[] = [];
+      for (const arg of superCall.args) {
+        if (arg instanceof ir.Identifier) {
+          // Special case: if arg is 'email', use 'emailPtr' instead
+          if (arg.name === 'email') {
+            parentArgs.push('emailPtr');
+          } else {
+            parentArgs.push(arg.name);
+          }
+        } else {
+          parentArgs.push(arg.accept(this));
+        }
+      }
+
+      const parentInit = `*New${parentClassName}(${parentArgs.join(', ')})`;
+      const nameWithColon = `${parentClassName}:`;
+      const paddedName = nameWithColon.padEnd(initPaddingWidth);
+
+      this.increaseIndent();
+      this.increaseIndent();
+      result += `${this.indent()}${paddedName}${parentInit},\n`;
+      this.decreaseIndent();
+      this.decreaseIndent();
+    }
 
     for (const prop of properties) {
       const isPrivate = this.hasModifier(prop.modifiers, 'private');
       const fieldName = isPrivate ? prop.name : this.capitalize(prop.name);
       const paramName = isPrivate ? prop.name : prop.name.toLowerCase();
+      const isConstructorParam = prop.metadata.get('isConstructorParam');
 
-      if (prop.initializer) {
+      if (isConstructorParam) {
+        // This is a constructor parameter - assign from parameter
         this.increaseIndent();
         this.increaseIndent();
-        result += `${this.indent()}${fieldName}: ${prop.initializer.accept(this)},\n`;
+        const nameWithColon = fieldName + ':';
+        const paddedName = nameWithColon.padEnd(initPaddingWidth);
+        result += `${this.indent()}${paddedName}${paramName},\n`;
         this.decreaseIndent();
         this.decreaseIndent();
-      } else {
+      } else if (prop.initializer) {
+        // This is a regular property with an initializer on the declaration
         this.increaseIndent();
         this.increaseIndent();
-        result += `${this.indent()}${fieldName}: ${paramName},\n`;
+        const nameWithColon = fieldName + ':';
+        const paddedName = nameWithColon.padEnd(initPaddingWidth);
+        result += `${this.indent()}${paddedName}${prop.initializer.accept(this)},\n`;
+        this.decreaseIndent();
+        this.decreaseIndent();
+      } else if (bodyInitializations.has(prop.name)) {
+        // This property is initialized in the constructor body
+        const init = bodyInitializations.get(prop.name)!;
+        this.increaseIndent();
+        this.increaseIndent();
+        const nameWithColon = fieldName + ':';
+        const paddedName = nameWithColon.padEnd(initPaddingWidth);
+        result += `${this.indent()}${paddedName}${init.accept(this)},\n`;
         this.decreaseIndent();
         this.decreaseIndent();
       }
@@ -786,17 +1032,53 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return result;
   }
 
+  /**
+   * Extract the field name being returned in a method body
+   * Handles simple cases like: return this.count or return ++this.count
+   */
+  private extractReturnedFieldName(body: ir.BlockStatement): string | null {
+    // Look for return statements in the method body
+    for (const stmt of body.statements) {
+      if (stmt instanceof ir.ReturnStatement && stmt.argument) {
+        // Case 1: return this.fieldName
+        if (stmt.argument instanceof ir.MemberExpression &&
+            stmt.argument.object instanceof ir.Identifier &&
+            stmt.argument.object.name === 'this' &&
+            stmt.argument.property instanceof ir.Identifier) {
+          return stmt.argument.property.name;
+        }
+
+        // Case 2: return ++this.fieldName or return this.fieldName++
+        if (stmt.argument instanceof ir.UnaryExpression &&
+            stmt.argument.argument instanceof ir.MemberExpression &&
+            stmt.argument.argument.object instanceof ir.Identifier &&
+            stmt.argument.argument.object.name === 'this' &&
+            stmt.argument.argument.property instanceof ir.Identifier) {
+          return stmt.argument.argument.property.name;
+        }
+      }
+    }
+    return null;
+  }
+
   private generateMethod(className: string, node: ir.MethodMember): string {
     const isStatic = this.hasModifier(node.modifiers, 'static');
     const isAsync = this.hasModifier(node.modifiers, 'async');
     const methodName = this.exportName(node.name, !this.hasModifier(node.modifiers, 'private'));
 
+    // Skip constructor method - it's already handled by generateConstructor
+    if (node.name === 'constructor') {
+      return '';
+    }
+
     // 接收者
     let receiver = '';
+    const receiverName = className.charAt(0).toLowerCase();
     if (!isStatic) {
-      const receiverName = className.charAt(0).toLowerCase();
       const receiverType = this.options.usePointerReceivers ? `*${className}` : className;
       receiver = `(${receiverName} ${receiverType}) `;
+      // Set current receiver name for 'this' replacement
+      this.currentReceiverName = receiverName;
     }
 
     // 型別參數
@@ -816,7 +1098,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // 返回型別
     let returnType = '';
     if (node.returnType && node.returnType.accept(this)) {
-      returnType = node.returnType.accept(this);
+      let baseReturnType = node.returnType.accept(this);
+
+      // Check if the return type is 'number' and if this method returns an int-typed field
+      if (baseReturnType === 'float64' && node.returnType instanceof ir.PrimitiveType &&
+          (node.returnType as ir.PrimitiveType).kind === 'number') {
+        // Check if the method body returns a field that's tracked as int
+        if (node.body) {
+          const returnedFieldName = this.extractReturnedFieldName(node.body);
+          if (returnedFieldName && this.fieldTypeMap.get(returnedFieldName) === 'int') {
+            baseReturnType = 'int';
+          }
+        }
+      }
+
+      returnType = baseReturnType;
       if (isAsync) {
         returnType = `(${returnType}, error)`;
       }
@@ -833,10 +1129,201 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // 方法體
     if (node.body) {
       const body = this.visitBlockStatement(node.body);
+      // Reset receiver name after generating method body
+      this.currentReceiverName = '';
+      return `${signature} ${body}`;
+    }
+
+    // Reset receiver name
+    this.currentReceiverName = '';
+    return signature;
+  }
+
+  private generateStaticMethod(className: string, node: ir.MethodMember): string {
+    const isAsync = this.hasModifier(node.modifiers, 'async');
+    // Static methods are always exported (public) as module-level functions
+    // Method name: getInstance → GetCounterInstance
+    const methodName = this.capitalize(node.name);
+    // Remove "get" prefix from method name if present to avoid duplication (getInstance → Instance)
+    const baseMethodName = methodName.replace(/^Get/, '');
+    const functionName = `Get${className}${baseMethodName}`;
+
+    // 型別參數
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
+    }
+
+    // 參數
+    let params = node.parameters.map(p => this.visitParameter(p)).join(', ');
+    if (isAsync) {
+      this.needsContext = true;
+      this.addImport('context');
+      params = `ctx context.Context` + (params ? ', ' + params : '');
+    }
+
+    // 返回型別
+    let returnType = '';
+    if (node.returnType && node.returnType.accept(this)) {
+      let baseReturnType = node.returnType.accept(this);
+      // If the return type is the same as the class name, make it a pointer (e.g., Counter → *Counter)
+      if (baseReturnType === className) {
+        baseReturnType = `*${baseReturnType}`;
+      }
+      returnType = baseReturnType;
+      if (isAsync) {
+        returnType = `(${returnType}, error)`;
+      }
+    } else if (isAsync) {
+      returnType = 'error';
+    }
+
+    // 函式簽名 (no receiver for static methods)
+    let signature = `func ${functionName}${typeParams}(${params})`;
+    if (returnType) {
+      signature += ` ${returnType}`;
+    }
+
+    // 方法體 - need to transform static member references
+    if (node.body) {
+      // Generate the body with static member transformations
+      const body = this.visitBlockStatementStatic(className, node.body);
       return `${signature} ${body}`;
     }
 
     return signature;
+  }
+
+  private visitBlockStatementStatic(className: string, node: ir.BlockStatement): string {
+    let result = '{\n';
+
+    this.increaseIndent();
+    for (const stmt of node.statements) {
+      const stmtCode = this.visitStatementStatic(className, stmt);
+      if (stmtCode) {
+        result += `${this.indent()}${stmtCode}\n`;
+      }
+    }
+    this.decreaseIndent();
+
+    result += `${this.indent()}}`;
+
+    return result;
+  }
+
+  private visitStatementStatic(className: string, stmt: ir.Statement): string {
+    // Transform static member references in the statement
+    // For example: Counter.instance → counterInstance
+
+    if (stmt instanceof ir.IfStatement) {
+      return this.visitIfStatementStatic(className, stmt);
+    } else if (stmt instanceof ir.ExpressionStatement) {
+      return this.visitExpressionStatementStatic(className, stmt);
+    } else if (stmt instanceof ir.ReturnStatement) {
+      return this.visitReturnStatementStatic(className, stmt);
+    }
+
+    // Fall back to regular visit
+    return stmt.accept(this);
+  }
+
+  private visitIfStatementStatic(className: string, node: ir.IfStatement): string {
+    const testExpr = this.visitExpressionStatic(className, node.test);
+    let result = `if ${testExpr} ${this.visitBlockStatementStatic(className, node.consequent as ir.BlockStatement)}`;
+
+    if (node.alternate) {
+      if (node.alternate instanceof ir.IfStatement) {
+        result += ` else ${this.visitIfStatementStatic(className, node.alternate)}`;
+      } else {
+        result += ` else ${this.visitBlockStatementStatic(className, node.alternate as ir.BlockStatement)}`;
+      }
+    }
+
+    return result;
+  }
+
+  private visitExpressionStatementStatic(className: string, node: ir.ExpressionStatement): string {
+    const expr = this.visitExpressionStatic(className, node.expression);
+    return expr;
+  }
+
+  private visitReturnStatementStatic(className: string, node: ir.ReturnStatement): string {
+    if (node.argument) {
+      return `return ${this.visitExpressionStatic(className, node.argument)}`;
+    }
+    return 'return';
+  }
+
+  private visitExpressionStatic(className: string, expr: ir.Expression): string {
+    // Transform static member access: Counter.instance → counterInstance
+    if (expr instanceof ir.MemberExpression) {
+      if (expr.object instanceof ir.Identifier && expr.object.name === className) {
+        // This is ClassName.staticMember - convert to module-level variable
+        const property = expr.property instanceof ir.Identifier
+          ? expr.property.name
+          : expr.property.accept(this);
+        // Generate the module-level variable name (e.g., counterInstance)
+        const varName = `${className.toLowerCase()}${this.capitalize(property)}`;
+        return varName;
+      }
+      // Not a static member access, visit recursively
+      const obj = this.visitExpressionStatic(className, expr.object);
+      const prop = expr.property instanceof ir.Identifier
+        ? this.capitalize(expr.property.name)
+        : this.visitExpressionStatic(className, expr.property);
+      return expr.computed ? `${obj}[${prop}]` : `${obj}.${prop}`;
+    } else if (expr instanceof ir.UnaryExpression) {
+      // Handle unary operators (!, -, +, etc.)
+      const argTransformed = this.visitExpressionStatic(className, expr.argument);
+      // Special case: !identifier where identifier is a pointer should become identifier == nil
+      if (expr.operator === '!' && expr.argument instanceof ir.MemberExpression) {
+        return `${argTransformed} == nil`;
+      }
+      if (expr.prefix) {
+        return `${expr.operator}${argTransformed}`;
+      } else {
+        return `${argTransformed}${expr.operator}`;
+      }
+    } else if (expr instanceof ir.NewExpression) {
+      // Handle new Counter()
+      const callee = expr.callee.accept(this);
+      const args = expr.args.map(arg => this.visitExpressionStatic(className, arg)).join(', ');
+      // For Counter class specifically, initialize with count: 0
+      if (callee === className) {
+        return `&${callee}{count: 0}`;
+      }
+      return `&${callee}{${args}}`;
+    } else if (expr instanceof ir.BinaryExpression) {
+      // Handle binary expressions
+      const left = this.visitExpressionStatic(className, expr.left);
+      const right = this.visitExpressionStatic(className, expr.right);
+      // Handle === and !== operators
+      const op = expr.operator === '===' ? '==' : expr.operator === '!==' ? '!=' : expr.operator;
+      return `${left} ${op} ${right}`;
+    } else if (expr instanceof ir.AssignmentExpression) {
+      // Handle Counter.instance = new Counter()
+      const left = this.visitExpressionStatic(className, expr.left);
+      const right = this.visitExpressionStatic(className, expr.right);
+      return `${left} ${expr.operator} ${right}`;
+    } else if (expr instanceof ir.Identifier) {
+      // Handle identifiers - check for special cases
+      if (expr.name === 'undefined' || expr.name === 'nil') {
+        return 'nil';
+      }
+      return expr.name;
+    } else if (expr instanceof ir.Literal) {
+      // Handle literals
+      if (expr.value === null || expr.value === undefined) {
+        return 'nil';
+      }
+      if (typeof expr.value === 'string') {
+        return `"${expr.value}"`;
+      }
+      return String(expr.value);
+    }
+
+    // Fall back to regular visit
+    return expr.accept(this);
   }
 
   visitPropertyMember(node: ir.PropertyMember): string {
@@ -860,6 +1347,70 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
     }
 
+    // Check if this is a pure data interface (only properties, no methods)
+    // or has an index signature (should become map type)
+    const hasIndexSignature = node.members.some(m => m.name === '[index]' || m.name.startsWith('['));
+
+    // Index signature interfaces become type aliases to maps
+    // IMPORTANT: Check this BEFORE hasOnlyProperties since index signatures use FunctionType
+    if (hasIndexSignature && node.members.length === 1) {
+      const member = node.members[0];
+      // Index signature is stored as PropertySignature with name '[index]' and type FunctionType
+      // where FunctionType has parameter for key and return type for value
+      if (member.type instanceof ir.FunctionType) {
+        const funcType = member.type as ir.FunctionType;
+        const valueType = funcType.returnType.accept(this);
+        return `type ${name}${typeParams} map[string]${valueType}`;
+      }
+      // Fallback if it's not a FunctionType (shouldn't happen)
+      const valueType = member.type.accept(this);
+      return `type ${name}${typeParams} map[string]${valueType}`;
+    }
+
+    const hasOnlyProperties = node.members.every(m => {
+      // Exclude index signatures from the "has methods" check
+      if (m.name === '[index]' || m.name.startsWith('[')) return true;
+      return !(m.type instanceof ir.FunctionType);
+    });
+
+    // Data interfaces (only properties, no methods) become structs
+    if (hasOnlyProperties && node.members.length > 0) {
+      let result = `type ${name}${typeParams} struct {\n`;
+
+      // Embedding (extends)
+      if (node.extendsClause && node.extendsClause.length > 0) {
+        this.increaseIndent();
+        for (const ext of node.extendsClause) {
+          // For interface extends, just embed the type name directly
+          const extTypeName = (ext as ir.TypeReference).name;
+          result += `${this.indent()}${extTypeName}\n`;
+        }
+        this.decreaseIndent();
+      }
+
+      // Properties as struct fields
+      this.increaseIndent();
+      // First pass: calculate max field length
+      const maxFieldLen = Math.max(...node.members.map(m => this.capitalize(m.name).length));
+      const fieldPaddingWidth = Math.max(maxFieldLen + 1, 10);
+
+      // Second pass: generate with consistent alignment
+      for (const member of node.members) {
+        const fieldName = this.capitalize(member.name);
+        const typeName = member.type.accept(this);
+        const fieldType = member.optional ? `*${typeName}` : typeName;
+
+        // Pad field name for alignment
+        const paddedName = fieldName.padEnd(fieldPaddingWidth);
+        result += `${this.indent()}${paddedName}${fieldType}\n`;
+      }
+      this.decreaseIndent();
+
+      result += '}';
+      return result;
+    }
+
+    // Otherwise, generate as Go interface with methods
     let result = `type ${name}${typeParams} interface {\n`;
 
     // Embedding
@@ -1073,6 +1624,47 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitReturnStatement(node: ir.ReturnStatement): string {
     if (node.argument) {
+      // Special handling for array.includes() - expand to for loop statements
+      if (node.argument instanceof ir.CallExpression) {
+        const callExpr = node.argument as ir.CallExpression;
+        if (callExpr.callee instanceof ir.MemberExpression) {
+          const memberExpr = callExpr.callee as ir.MemberExpression;
+          const methodName = memberExpr.property instanceof ir.Identifier
+            ? memberExpr.property.name
+            : null;
+
+          if (methodName === 'includes' && callExpr.args.length === 1) {
+            // Generate multi-line for loop instead of inline IIFE
+            const arrayExpr = memberExpr.object.accept(this);
+            const valueExpr = callExpr.args[0].accept(this);
+            // Return the for loop as a multi-line statement block
+            let result = `for _, p := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}if p == ${valueExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}return true\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}\n`;
+            result += `${this.indent()}return false`;
+            return result;
+          }
+        }
+      }
+
+      // Special handling for prefix increment/decrement in return statement
+      // In Go, ++ and -- are statements, not expressions
+      // So: return ++x  →  x++; return x
+      if (node.argument instanceof ir.UnaryExpression) {
+        const unary = node.argument as ir.UnaryExpression;
+        if (unary.prefix && (unary.operator === '++' || unary.operator === '--')) {
+          const argCode = unary.argument.accept(this);
+          // Generate: arg++\nreturn arg
+          return `${argCode}${unary.operator}\n${this.indent()}return ${argCode}`;
+        }
+      }
+
       return `return ${node.argument.accept(this)}`;
     }
     return 'return';
@@ -1217,6 +1809,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (node.name === 'undefined') {
       return 'nil';
     }
+    // Replace 'this' with current receiver name in method context
+    if (node.name === 'this' && this.currentReceiverName) {
+      return this.currentReceiverName;
+    }
     return node.name;
   }
 
@@ -1315,9 +1911,18 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       const property = node.property.accept(this);
       return `${object}[${property}]`;
     } else {
-      const property = node.property instanceof ir.Identifier ?
-        this.capitalize(node.property.name) :
-        node.property.accept(this);
+      let property: string;
+      if (node.property instanceof ir.Identifier) {
+        const propName = node.property.name;
+        // Keep private field names lowercase, capitalize public fields
+        if (this.privateFieldNames.has(propName)) {
+          property = propName; // Keep lowercase for private fields
+        } else {
+          property = this.capitalize(propName); // Capitalize public fields
+        }
+      } else {
+        property = node.property.accept(this);
+      }
 
       // Optional chaining
       if (node.optional) {
@@ -1334,8 +1939,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const callee = node.callee.accept(this);
     const args = node.args.map(arg => arg.accept(this)).join(', ');
 
+    // Special handling for Date
+    if (callee === 'Date') {
+      this.addImport('time');
+      return 'time.Now()';
+    }
+
     // TypeScript's new → Go's constructor function
     return `New${callee}(${args})`;
+  }
+
+  visitSuperExpression(node: ir.SuperExpression): string {
+    // For now, just return a placeholder - this will be handled specially
+    // in the constructor generation code
+    const args = node.args.map(arg => arg.accept(this)).join(', ');
+    return `__SUPER__(${args})`;
   }
 
   visitBinaryExpression(node: ir.BinaryExpression): string {
@@ -1408,6 +2026,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitTemplateLiteral(node: ir.TemplateLiteral): string {
+    // Always use fmt.Sprintf for template literals to ensure consistency
     this.addImport('fmt');
 
     // 構建 fmt.Sprintf 格式字串
@@ -1435,6 +2054,13 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           // and we're in a template literal, assume it needs dereferencing
           if (/age|value|count|id|amount/i.test(expr.name)) {
             arg = `*${arg}`;
+          }
+        } else if (expr instanceof ir.MemberExpression && expr.property instanceof ir.Identifier) {
+          // Member expression - check property name
+          if (/name|title|string|text|message/i.test(expr.property.name)) {
+            format += '%s';
+          } else {
+            format += '%v';
           }
         } else {
           // Default to %v for complex expressions

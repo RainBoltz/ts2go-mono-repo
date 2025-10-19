@@ -23,7 +23,7 @@
     "compiler"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "GPL-2.0-only",
   "dependencies": {
     "chalk": "^4.1.2",
     "chokidar": "^3.5.3",

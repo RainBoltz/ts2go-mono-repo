@@ -164,12 +164,73 @@ export class IRTransformer {
 
     const members: ir.ClassMember[] = [];
 
-    for (const member of node.members) {
-      const irMember = this.transformClassMember(member);
-      if (irMember) {
-        members.push(irMember);
+    // First, find constructor and collect parameter properties with their position
+    const constructor = node.members.find(ts.isConstructorDeclaration);
+    const constructorIndex = constructor ? node.members.indexOf(constructor) : -1;
+    const parameterProperties = new Map<string, ir.PropertyMember>();
+
+    if (constructor) {
+      for (const param of constructor.parameters) {
+        // Check if parameter has visibility modifier (public, private, protected, readonly)
+        const hasVisibilityModifier = param.modifiers?.some(m =>
+          m.kind === ts.SyntaxKind.PublicKeyword ||
+          m.kind === ts.SyntaxKind.PrivateKeyword ||
+          m.kind === ts.SyntaxKind.ProtectedKeyword ||
+          m.kind === ts.SyntaxKind.ReadonlyKeyword
+        );
+
+        if (hasVisibilityModifier && ts.isIdentifier(param.name)) {
+          // Create a PropertyMember for this parameter property
+          const propMember = new ir.PropertyMember(
+            param.name.text,
+            param.type ? this.transformTypeNode(param.type) : undefined,
+            undefined, // no initializer for parameter properties
+            this.getModifiers(param),
+            this.parser.getSourceLocation(param)
+          );
+          // Mark this as a constructor parameter property
+          propMember.metadata.set('isConstructorParam', true);
+          propMember.metadata.set('isOptional', !!param.questionToken);
+          parameterProperties.set(param.name.text, propMember);
+        }
       }
     }
+
+    // Property ordering rule (to match expected Go output):
+    // 1. Declared properties WITH inline initializers (in source order)
+    // 2. Constructor parameter properties (in parameter order)
+    // 3. Declared properties WITHOUT inline initializers (in source order)
+    // 4. Methods and constructor
+
+    const declaredPropsWithInit: ir.PropertyMember[] = [];
+    const declaredPropsWithoutInit: ir.PropertyMember[] = [];
+    const nonPropertyMembers: ir.ClassMember[] = [];
+
+    for (const member of node.members) {
+      const irMember = this.transformClassMember(member);
+      if (irMember && irMember instanceof ir.PropertyMember) {
+        // Skip if this property is a constructor parameter (will be added separately)
+        if (!parameterProperties.has(irMember.name)) {
+          // Check if this property has an inline initializer
+          if (irMember.initializer) {
+            declaredPropsWithInit.push(irMember);
+          } else {
+            declaredPropsWithoutInit.push(irMember);
+          }
+        }
+      } else if (irMember) {
+        // Methods, constructor, etc.
+        nonPropertyMembers.push(irMember);
+      }
+    }
+
+    // Add in the correct order
+    members.push(...declaredPropsWithInit);
+    for (const [_, propMember] of parameterProperties) {
+      members.push(propMember);
+    }
+    members.push(...declaredPropsWithoutInit);
+    members.push(...nonPropertyMembers);
 
     const heritage = node.heritageClauses?.find(
       h => h.token === ts.SyntaxKind.ExtendsKeyword
@@ -398,9 +459,20 @@ export class IRTransformer {
   /**
    * 轉換型別節點
    */
-  private transformTypeNode(node?: ts.TypeNode): ir.IRType {
+  private transformTypeNode(node?: ts.TypeNode | ts.ExpressionWithTypeArguments): ir.IRType {
     if (!node) {
       return new ir.PrimitiveType('any');
+    }
+
+    // Handle ExpressionWithTypeArguments (used in extends/implements clauses)
+    if (ts.isExpressionWithTypeArguments(node)) {
+      const expr = node.expression;
+      const typeName = ts.isIdentifier(expr) ? expr.text : expr.getText();
+      return new ir.TypeReference(
+        typeName,
+        node.typeArguments?.map(t => this.transformTypeNode(t)),
+        this.parser.getSourceLocation(node)
+      );
     }
 
     switch (node.kind) {
@@ -545,6 +617,12 @@ export class IRTransformer {
    */
   private transformExpression(node: ts.Expression): ir.Expression {
     switch (node.kind) {
+      case ts.SyntaxKind.ThisKeyword:
+        return new ir.Identifier(
+          'this',
+          this.parser.getSourceLocation(node)
+        );
+
       case ts.SyntaxKind.Identifier:
         return new ir.Identifier(
           (node as ts.Identifier).text,
@@ -989,7 +1067,15 @@ export class IRTransformer {
     return new ir.ObjectExpression(properties, this.parser.getSourceLocation(node));
   }
 
-  private transformCallExpression(node: ts.CallExpression): ir.CallExpression {
+  private transformCallExpression(node: ts.CallExpression): ir.CallExpression | ir.SuperExpression {
+    // Check if this is a super() call
+    if (node.expression.kind === ts.SyntaxKind.SuperKeyword) {
+      return new ir.SuperExpression(
+        node.arguments.map(arg => this.transformExpression(arg)),
+        this.parser.getSourceLocation(node)
+      );
+    }
+
     const typeArguments = node.typeArguments?.map(t => this.transformTypeNode(t));
 
     return new ir.CallExpression(

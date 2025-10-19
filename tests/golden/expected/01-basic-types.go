@@ -2,9 +2,9 @@ package main
 
 import "fmt"
 
-var str string = "hello"
-var num float64 = 42
-var bool bool = true
+var strr string = "hello"
+var numm float64 = 42
+var boool bool = true
 var nothing interface{} = nil
 
 var inferredString = "world"
@@ -15,7 +15,7 @@ var anyValue interface{} = 42
 
 var unknownValue interface{} = 42
 
-var numbers = []float64{1, 2, 3, 4, 5}
+var numberss = []float64{1, 2, 3, 4, 5}
 var strings = []string{"a", "b", "c"}
 
 type Tuple2_string_float64 struct {

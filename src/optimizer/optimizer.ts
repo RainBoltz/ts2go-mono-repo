@@ -285,6 +285,9 @@ class SymbolCollector implements ir.IRVisitor<void> {
     node.callee.accept(this);
     node.args.forEach(arg => arg.accept(this));
   }
+  visitSuperExpression(node: ir.SuperExpression): void {
+    node.args.forEach(arg => arg.accept(this));
+  }
   visitBinaryExpression(node: ir.BinaryExpression): void {
     node.left.accept(this);
     node.right.accept(this);

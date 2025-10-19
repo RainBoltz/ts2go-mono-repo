@@ -698,6 +698,19 @@ export class NewExpression extends Expression {
   }
 }
 
+export class SuperExpression extends Expression {
+  constructor(
+    public args: Expression[],
+    location?: SourceLocation
+  ) {
+    super(location);
+  }
+
+  accept<T>(visitor: IRVisitor<T>): T {
+    return visitor.visitSuperExpression(this);
+  }
+}
+
 export class BinaryExpression extends Expression {
   constructor(
     public operator: BinaryOperator,
@@ -946,6 +959,7 @@ export interface IRVisitor<T> {
   visitCallExpression(node: CallExpression): T;
   visitMemberExpression(node: MemberExpression): T;
   visitNewExpression(node: NewExpression): T;
+  visitSuperExpression(node: SuperExpression): T;
   visitBinaryExpression(node: BinaryExpression): T;
   visitUnaryExpression(node: UnaryExpression): T;
   visitAssignmentExpression(node: AssignmentExpression): T;
