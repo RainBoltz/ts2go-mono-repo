@@ -21,6 +21,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private imports = new Set<string>();
   private needsContext = false;
   private needsRuntime = false;
+  private tupleTypes = new Map<string, ir.TupleType>(); // Track tuple types to generate
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -47,6 +48,50 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.imports.clear();
     this.needsContext = false;
     this.needsRuntime = false;
+    this.tupleTypes.clear();
+  }
+
+  /**
+   * Generate a named tuple type definition
+   */
+  private generateTupleTypeName(tuple: ir.TupleType): string {
+    const typeNames = tuple.elements.map(e => {
+      const typeName = e.accept(this);
+      // Simplify type names for the tuple name
+      return typeName.replace(/\[\]/g, 'Array').replace(/\*/g, 'Ptr').replace(/{}/g, '');
+    }).join('_');
+    return `Tuple${tuple.elements.length}_${typeNames}`;
+  }
+
+  /**
+   * Register a tuple type for generation
+   */
+  private registerTupleType(tuple: ir.TupleType): string {
+    const typeName = this.generateTupleTypeName(tuple);
+    if (!this.tupleTypes.has(typeName)) {
+      this.tupleTypes.set(typeName, tuple);
+    }
+    return typeName;
+  }
+
+  /**
+   * Generate all registered tuple type definitions
+   */
+  private generateTupleTypes(): string {
+    if (this.tupleTypes.size === 0) return '';
+
+    const types: string[] = [];
+    for (const [name, tuple] of this.tupleTypes.entries()) {
+      let typeDef = `type ${name} struct {\n`;
+      for (let i = 0; i < tuple.elements.length; i++) {
+        const fieldType = tuple.elements[i].accept(this);
+        typeDef += `\tItem${i} ${fieldType}\n`;
+      }
+      typeDef += '}';
+      types.push(typeDef);
+    }
+
+    return types.join('\n\n') + '\n\n';
   }
 
   // ============= 輔助方法 =============
@@ -105,7 +150,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     let result = `// Generated from: ${node.name}\n\n`;
     result += `package ${this.currentPackage}\n\n`;
 
-    // 收集所有宣告，確定需要的 imports
+    // 收集所有宣告，確定需要的 imports和tuple types
     const declarations: string[] = [];
     for (const stmt of node.statements) {
       if (stmt instanceof ir.Declaration) {
@@ -117,6 +162,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 產生 imports
     result += this.generateImports();
+
+    // 產生 tuple type definitions
+    result += this.generateTupleTypes();
 
     // 產生宣告
     result += declarations.join('\n\n');
@@ -155,7 +203,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       case 'boolean':
         return 'bool';
       case 'void':
-        return ''; // void 不返回值
+        return 'interface{}'; // void mapped to interface{} for variables
       case 'any':
       case 'unknown':
         return 'interface{}';
@@ -172,12 +220,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitTupleType(node: ir.TupleType): string {
-    // Tuple 轉換為 struct
-    const fields = node.elements.map((type, idx) => {
-      return `${this.indent()}\tItem${idx} ${type.accept(this)}`;
-    }).join('\n');
-
-    return `struct {\n${fields}\n${this.indent()}}`;
+    // Register tuple type and return its name
+    return this.registerTupleType(node);
   }
 
   visitObjectType(node: ir.ObjectType): string {
@@ -228,6 +272,12 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitTypeReference(node: ir.TypeReference): string {
     let typeName = node.name;
+
+    // Special handling for Array<T> → []T
+    if (typeName === 'Array' && node.typeArguments && node.typeArguments.length === 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `[]${elementType}`;
+    }
 
     // 處理泛型參數
     if (node.typeArguments && node.typeArguments.length > 0) {
@@ -284,7 +334,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (node.type) {
       const typeName = node.type.accept(this);
       if (node.initializer) {
-        const init = node.initializer.accept(this);
+        // Special handling for tuple initialization
+        let init: string;
+        if (node.type instanceof ir.TupleType && node.initializer instanceof ir.ArrayExpression) {
+          // Generate struct initialization instead of array literal
+          const elements = node.initializer.elements
+            .map(e => e ? e.accept(this) : 'nil')
+            .join(', ');
+          init = `${typeName}{${elements}}`;
+        } else {
+          init = node.initializer.accept(this);
+        }
         return `var ${name} ${typeName} = ${init}`;
       }
       return `var ${name} ${typeName}`;
@@ -885,6 +945,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return 'nil';
     }
     if (node.value === undefined) {
+      return 'nil';
+    }
+    if (node.raw === 'undefined') {
       return 'nil';
     }
     if (typeof node.value === 'string') {

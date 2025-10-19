@@ -228,7 +228,48 @@ export class IRTransformer {
       );
     }
 
-    // TODO: Constructor, Getter, Setter
+    if (ts.isConstructorDeclaration(node)) {
+      return new ir.MethodMember(
+        'constructor',
+        node.parameters.map(p => this.transformParameter(p)),
+        undefined,
+        node.body ? this.transformBlock(node.body) : undefined,
+        undefined,
+        this.getModifiers(node),
+        this.parser.getSourceLocation(node)
+      );
+    }
+
+    if (ts.isGetAccessorDeclaration(node)) {
+      const name = this.getPropertyName(node.name);
+      if (!name) return null;
+
+      return new ir.MethodMember(
+        `get_${name}`,
+        [],
+        node.type ? this.transformTypeNode(node.type) : undefined,
+        node.body ? this.transformBlock(node.body) : undefined,
+        undefined,
+        this.getModifiers(node),
+        this.parser.getSourceLocation(node)
+      );
+    }
+
+    if (ts.isSetAccessorDeclaration(node)) {
+      const name = this.getPropertyName(node.name);
+      if (!name) return null;
+
+      return new ir.MethodMember(
+        `set_${name}`,
+        node.parameters.map(p => this.transformParameter(p)),
+        undefined,
+        node.body ? this.transformBlock(node.body) : undefined,
+        undefined,
+        this.getModifiers(node),
+        this.parser.getSourceLocation(node)
+      );
+    }
+
     return null;
   }
 
@@ -250,8 +291,53 @@ export class IRTransformer {
             this.parser.getSourceLocation(member)
           ));
         }
+      } else if (ts.isMethodSignature(member)) {
+        const name = this.getPropertyName(member.name);
+        if (name) {
+          const methodType = new ir.FunctionType(
+            member.parameters.map(p => this.transformParameter(p)),
+            member.type ? this.transformTypeNode(member.type) : new ir.PrimitiveType('void'),
+            member.typeParameters?.map(tp => this.transformTypeParameter(tp)),
+            false,
+            this.parser.getSourceLocation(member)
+          );
+          members.push(new ir.PropertySignature(
+            name,
+            methodType,
+            !!member.questionToken,
+            false,
+            this.parser.getSourceLocation(member)
+          ));
+        }
+      } else if (ts.isIndexSignatureDeclaration(member)) {
+        // Index signatures: [key: string]: Type
+        const param = member.parameters[0];
+        if (param && member.type) {
+          const keyType = param.type ? this.transformTypeNode(param.type) : new ir.PrimitiveType('string');
+          const valueType = this.transformTypeNode(member.type);
+          // Store as a special property with name "[index]"
+          members.push(new ir.PropertySignature(
+            '[index]',
+            new ir.FunctionType(
+              [new ir.Parameter(
+                param.name ? (param.name as ts.Identifier).text : 'key',
+                keyType,
+                false,
+                undefined,
+                false,
+                this.parser.getSourceLocation(param)
+              )],
+              valueType,
+              undefined,
+              false,
+              this.parser.getSourceLocation(member)
+            ),
+            false,
+            false,
+            this.parser.getSourceLocation(member)
+          ));
+        }
       }
-      // TODO: Method signatures, index signatures
     }
 
     const heritage = node.heritageClauses?.find(
@@ -434,7 +520,16 @@ export class IRTransformer {
           ));
         }
       } else if (ts.isIndexSignatureDeclaration(member)) {
-        // TODO: Handle index signatures
+        const param = member.parameters[0];
+        if (param && member.type) {
+          const keyType = param.type ? this.transformTypeNode(param.type) : new ir.PrimitiveType('string');
+          const valueType = this.transformTypeNode(member.type);
+          indexSignature = new ir.IndexSignature(
+            keyType,
+            valueType,
+            this.parser.getSourceLocation(member)
+          );
+        }
       }
     }
 
@@ -599,10 +694,9 @@ export class IRTransformer {
     const path = sourceFile.fileName;
     const parts = path.split('/');
     const fileName = parts[parts.length - 1];
-    return fileName.replace(/\.(ts|tsx)$/, '');
+    return fileName; // Keep the .ts extension
   }
 
-  // 簡化其他轉換方法實作...
   private transformBlock(node: ts.Block): ir.BlockStatement {
     const statements: ir.Statement[] = [];
     for (const stmt of node.statements) {
@@ -614,18 +708,78 @@ export class IRTransformer {
     return new ir.BlockStatement(statements, this.parser.getSourceLocation(node));
   }
 
-  // 其他必要的轉換方法暫時返回預設值
   private transformImportDeclaration(node: ts.ImportDeclaration): ir.ImportDeclaration {
-    // TODO: 完整實作
-    return new ir.ImportDeclaration([], '', this.parser.getSourceLocation(node));
+    const specifiers: ir.ImportSpecifier[] = [];
+    const moduleSpecifier = (node.moduleSpecifier as ts.StringLiteral).text;
+
+    if (node.importClause) {
+      // Default import: import Foo from 'module'
+      if (node.importClause.name) {
+        specifiers.push(new ir.ImportSpecifier(
+          'default',
+          node.importClause.name.text,
+          true,
+          false,
+          this.parser.getSourceLocation(node.importClause.name)
+        ));
+      }
+
+      // Named imports: import { A, B } from 'module'
+      if (node.importClause.namedBindings) {
+        const bindings = node.importClause.namedBindings;
+
+        if (ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            specifiers.push(new ir.ImportSpecifier(
+              element.propertyName?.text || element.name.text,
+              element.name.text,
+              false,
+              false,
+              this.parser.getSourceLocation(element)
+            ));
+          }
+        } else if (ts.isNamespaceImport(bindings)) {
+          // import * as Foo from 'module'
+          specifiers.push(new ir.ImportSpecifier(
+            '*',
+            bindings.name.text,
+            false,
+            true,
+            this.parser.getSourceLocation(bindings)
+          ));
+        }
+      }
+    }
+
+    return new ir.ImportDeclaration(
+      specifiers,
+      moduleSpecifier,
+      this.parser.getSourceLocation(node)
+    );
   }
 
   private transformExportDeclaration(node: ts.ExportDeclaration): ir.ExportDeclaration {
-    // TODO: 完整實作
-    return new ir.ExportDeclaration(undefined, [], undefined, false, this.parser.getSourceLocation(node));
-  }
+    const specifiers: ir.ExportSpecifier[] = [];
+    const source = node.moduleSpecifier ? (node.moduleSpecifier as ts.StringLiteral).text : undefined;
 
-  // ... 更多輔助方法的簡化實作 ...
+    if (node.exportClause && ts.isNamedExports(node.exportClause)) {
+      for (const element of node.exportClause.elements) {
+        specifiers.push(new ir.ExportSpecifier(
+          element.propertyName?.text || element.name.text,
+          element.name.text,
+          this.parser.getSourceLocation(element)
+        ));
+      }
+    }
+
+    return new ir.ExportDeclaration(
+      undefined,
+      specifiers,
+      source,
+      false,
+      this.parser.getSourceLocation(node)
+    );
+  }
 
   private transformExpressionStatement(node: ts.ExpressionStatement): ir.ExpressionStatement {
     return new ir.ExpressionStatement(
@@ -655,19 +809,60 @@ export class IRTransformer {
   }
 
   private transformForStatement(node: ts.ForStatement): ir.ForStatement {
-    // TODO: 完整實作
+    let init: ir.VariableDeclaration | ir.Expression | undefined;
+
+    if (node.initializer) {
+      if (ts.isVariableDeclarationList(node.initializer)) {
+        // for (let i = 0; ...)
+        const decl = node.initializer.declarations[0];
+        if (ts.isIdentifier(decl.name)) {
+          const isConst = !!(node.initializer.flags & ts.NodeFlags.Const);
+          init = new ir.VariableDeclaration(
+            decl.name.text,
+            decl.type ? this.transformTypeNode(decl.type) : undefined,
+            decl.initializer ? this.transformExpression(decl.initializer) : undefined,
+            isConst,
+            [],
+            this.parser.getSourceLocation(decl)
+          );
+        }
+      } else {
+        // for (i = 0; ...)
+        init = this.transformExpression(node.initializer);
+      }
+    }
+
     return new ir.ForStatement(
       this.transformStatement(node.statement)!,
-      undefined,
-      undefined,
-      undefined,
+      init,
+      node.condition ? this.transformExpression(node.condition) : undefined,
+      node.incrementor ? this.transformExpression(node.incrementor) : undefined,
       this.parser.getSourceLocation(node)
     );
   }
 
   private transformForOfStatement(node: ts.ForOfStatement): ir.ForOfStatement {
-    // TODO: 完整實作
-    const varDecl = new ir.VariableDeclaration('item', undefined, undefined, false, []);
+    let varDecl: ir.VariableDeclaration;
+
+    if (ts.isVariableDeclarationList(node.initializer)) {
+      const decl = node.initializer.declarations[0];
+      if (ts.isIdentifier(decl.name)) {
+        const isConst = !!(node.initializer.flags & ts.NodeFlags.Const);
+        varDecl = new ir.VariableDeclaration(
+          decl.name.text,
+          decl.type ? this.transformTypeNode(decl.type) : undefined,
+          undefined,
+          isConst,
+          [],
+          this.parser.getSourceLocation(decl)
+        );
+      } else {
+        varDecl = new ir.VariableDeclaration('item', undefined, undefined, false, []);
+      }
+    } else {
+      varDecl = new ir.VariableDeclaration('item', undefined, undefined, false, []);
+    }
+
     return new ir.ForOfStatement(
       varDecl,
       this.transformExpression(node.expression),
@@ -700,43 +895,118 @@ export class IRTransformer {
   }
 
   private transformCatchClause(node: ts.CatchClause): ir.CatchClause {
-    // TODO: 完整實作
+    let param: ir.Parameter | undefined;
+
+    if (node.variableDeclaration) {
+      const name = ts.isIdentifier(node.variableDeclaration.name)
+        ? node.variableDeclaration.name.text
+        : 'error';
+      param = new ir.Parameter(
+        name,
+        node.variableDeclaration.type ? this.transformTypeNode(node.variableDeclaration.type) : undefined,
+        false,
+        undefined,
+        false,
+        this.parser.getSourceLocation(node.variableDeclaration)
+      );
+    }
+
     return new ir.CatchClause(
       this.transformBlock(node.block),
-      undefined,
+      param,
       this.parser.getSourceLocation(node)
     );
   }
 
   private transformSwitchStatement(node: ts.SwitchStatement): ir.SwitchStatement {
-    // TODO: 完整實作
+    const cases: ir.SwitchCase[] = [];
+
+    for (const clause of node.caseBlock.clauses) {
+      const test = ts.isCaseClause(clause)
+        ? this.transformExpression(clause.expression)
+        : undefined;
+
+      const consequent: ir.Statement[] = [];
+      for (const stmt of clause.statements) {
+        const irStmt = this.transformStatement(stmt);
+        if (irStmt) {
+          consequent.push(irStmt);
+        }
+      }
+
+      cases.push(new ir.SwitchCase(
+        consequent,
+        test,
+        this.parser.getSourceLocation(clause)
+      ));
+    }
+
     return new ir.SwitchStatement(
       this.transformExpression(node.expression),
-      [],
+      cases,
       this.parser.getSourceLocation(node)
     );
   }
 
   private transformObjectLiteral(node: ts.ObjectLiteralExpression): ir.ObjectExpression {
     const properties: ir.Property[] = [];
-    // TODO: 完整實作
+
+    for (const prop of node.properties) {
+      if (ts.isPropertyAssignment(prop)) {
+        const keyName = this.getPropertyName(prop.name);
+        if (keyName) {
+          const keyExpr = ts.isComputedPropertyName(prop.name)
+            ? this.transformExpression(prop.name.expression)
+            : new ir.Identifier(keyName, this.parser.getSourceLocation(prop.name));
+
+          properties.push(new ir.Property(
+            keyExpr,
+            this.transformExpression(prop.initializer),
+            false,
+            ts.isComputedPropertyName(prop.name),
+            this.parser.getSourceLocation(prop)
+          ));
+        }
+      } else if (ts.isShorthandPropertyAssignment(prop)) {
+        properties.push(new ir.Property(
+          new ir.Identifier(prop.name.text, this.parser.getSourceLocation(prop.name)),
+          new ir.Identifier(prop.name.text, this.parser.getSourceLocation(prop.name)),
+          true,
+          false,
+          this.parser.getSourceLocation(prop)
+        ));
+      } else if (ts.isSpreadAssignment(prop)) {
+        properties.push(new ir.Property(
+          new ir.Literal('...', '...', this.parser.getSourceLocation(prop)),
+          this.transformExpression(prop.expression),
+          false,
+          false,
+          this.parser.getSourceLocation(prop)
+        ));
+      }
+    }
+
     return new ir.ObjectExpression(properties, this.parser.getSourceLocation(node));
   }
 
   private transformCallExpression(node: ts.CallExpression): ir.CallExpression {
+    const typeArguments = node.typeArguments?.map(t => this.transformTypeNode(t));
+
     return new ir.CallExpression(
       this.transformExpression(node.expression),
       node.arguments.map(arg => this.transformExpression(arg)),
-      undefined, // TODO: Type arguments
+      typeArguments,
       this.parser.getSourceLocation(node)
     );
   }
 
   private transformNewExpression(node: ts.NewExpression): ir.NewExpression {
+    const typeArguments = node.typeArguments?.map(t => this.transformTypeNode(t));
+
     return new ir.NewExpression(
       this.transformExpression(node.expression),
       node.arguments?.map(arg => this.transformExpression(arg)) || [],
-      undefined, // TODO: Type arguments
+      typeArguments,
       this.parser.getSourceLocation(node)
     );
   }
@@ -845,13 +1115,24 @@ export class IRTransformer {
   }
 
   private getBinaryOperator(kind: ts.SyntaxKind): string {
-    // TODO: 完整對映
     switch (kind) {
+      // Arithmetic
       case ts.SyntaxKind.PlusToken: return '+';
       case ts.SyntaxKind.MinusToken: return '-';
       case ts.SyntaxKind.AsteriskToken: return '*';
       case ts.SyntaxKind.SlashToken: return '/';
       case ts.SyntaxKind.PercentToken: return '%';
+      case ts.SyntaxKind.AsteriskAsteriskToken: return '**';
+
+      // Bitwise
+      case ts.SyntaxKind.AmpersandToken: return '&';
+      case ts.SyntaxKind.BarToken: return '|';
+      case ts.SyntaxKind.CaretToken: return '^';
+      case ts.SyntaxKind.LessThanLessThanToken: return '<<';
+      case ts.SyntaxKind.GreaterThanGreaterThanToken: return '>>';
+      case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken: return '>>>';
+
+      // Comparison
       case ts.SyntaxKind.EqualsEqualsToken: return '==';
       case ts.SyntaxKind.EqualsEqualsEqualsToken: return '===';
       case ts.SyntaxKind.ExclamationEqualsToken: return '!=';
@@ -860,15 +1141,37 @@ export class IRTransformer {
       case ts.SyntaxKind.LessThanEqualsToken: return '<=';
       case ts.SyntaxKind.GreaterThanToken: return '>';
       case ts.SyntaxKind.GreaterThanEqualsToken: return '>=';
+
+      // Logical
       case ts.SyntaxKind.AmpersandAmpersandToken: return '&&';
       case ts.SyntaxKind.BarBarToken: return '||';
+      case ts.SyntaxKind.QuestionQuestionToken: return '??';
+
+      // Assignment
       case ts.SyntaxKind.EqualsToken: return '=';
+      case ts.SyntaxKind.PlusEqualsToken: return '+=';
+      case ts.SyntaxKind.MinusEqualsToken: return '-=';
+      case ts.SyntaxKind.AsteriskEqualsToken: return '*=';
+      case ts.SyntaxKind.SlashEqualsToken: return '/=';
+      case ts.SyntaxKind.PercentEqualsToken: return '%=';
+      case ts.SyntaxKind.AmpersandEqualsToken: return '&=';
+      case ts.SyntaxKind.BarEqualsToken: return '|=';
+      case ts.SyntaxKind.CaretEqualsToken: return '^=';
+      case ts.SyntaxKind.LessThanLessThanEqualsToken: return '<<=';
+      case ts.SyntaxKind.GreaterThanGreaterThanEqualsToken: return '>>=';
+      case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken: return '>>>=';
+      case ts.SyntaxKind.AsteriskAsteriskEqualsToken: return '**=';
+
+      // Special
+      case ts.SyntaxKind.InKeyword: return 'in';
+      case ts.SyntaxKind.InstanceOfKeyword: return 'instanceof';
+      case ts.SyntaxKind.CommaToken: return ',';
+
       default: return '=';
     }
   }
 
   private getUnaryOperator(node: ts.UnaryExpression): ir.UnaryOperator {
-    // TODO: 完整對映
     if (ts.isPrefixUnaryExpression(node)) {
       switch (node.operator) {
         case ts.SyntaxKind.PlusToken: return '+';
@@ -879,8 +1182,14 @@ export class IRTransformer {
         case ts.SyntaxKind.MinusMinusToken: return '--';
         default: return '!';
       }
+    } else if (ts.isPostfixUnaryExpression(node)) {
+      switch (node.operator) {
+        case ts.SyntaxKind.PlusPlusToken: return '++';
+        case ts.SyntaxKind.MinusMinusToken: return '--';
+        default: return '++';
+      }
     }
-    return '++';
+    return '!';
   }
 
   private isAssignmentOperator(op: string): boolean {
