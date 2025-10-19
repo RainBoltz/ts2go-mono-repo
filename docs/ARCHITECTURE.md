@@ -1,4 +1,7 @@
-# TS2Go 架構設計文件
+# TS2Go Architecture Design
+
+> 本文件詳細說明 TS2Go 的架構設計、編譯流程、資料結構與實作細節。
+> For English version, see README.md. This document contains detailed technical specifications in Chinese.
 
 ## 總體架構
 
@@ -594,33 +597,56 @@ ts2go runtime -o <dir>                # 產生 runtime
 - 配置檔支援 (ts2go.json)
 - 錯誤報告與堆疊追蹤
 
+## 重要實作細節
+
+### IR 節點數量
+完整的 IR 系統包含 **40+ 節點類型**，全部定義於 `src/ir/nodes.ts`：
+- 9 種 Type 節點（PrimitiveType, ArrayType, UnionType 等）
+- 8 種 Declaration 節點（VariableDeclaration, FunctionDeclaration 等）
+- 12 種 Statement 節點（IfStatement, ForStatement, TryStatement 等）
+- 16 種 Expression 節點（BinaryExpression, CallExpression 等）
+- 4 種 Module 節點（Module, ImportDeclaration 等）
+
+### Visitor Pattern 完整性
+所有 IR 節點必須：
+1. 繼承自適當的基類（IRType, Declaration, Statement, Expression）
+2. 實作 `accept<T>(visitor: IRVisitor<T>): T` 方法
+3. 在 `IRVisitor<T>` 介面中有對應的 `visitXxx()` 方法
+4. 在所有 visitor 實作（GoCodeGenerator, SymbolCollector 等）中有對應實作
+
+### 錯誤位置追蹤
+每個 IR 節點都包含 `SourceLocation`，用於：
+- 錯誤訊息精確定位到原始 TypeScript 檔案
+- Source Map 產生
+- 除錯資訊保留
+
 ## 實作進度
 
-### ✅ 已完成
-- [x] IR 型別系統 (40+ 節點類型)
-- [x] TypeScript Parser (完整型別檢查)
-- [x] IR Transformer (AST → IR)
-- [x] Go Code Generator (完整實作)
-- [x] Type Mapper (多策略支援)
-- [x] Source Map 產生
-- [x] Optimization System (死碼消除等)
-- [x] Test Framework (Jest + Golden Tests)
-- [x] Differential Testing Tool
-- [x] Runtime Helpers (Go template)
-- [x] CLI Tool (完整功能)
-- [x] 10 個黃金測試樣例
+### ✅ 已完成（Production Ready）
+- [x] IR 型別系統 (40+ 節點類型) - `src/ir/nodes.ts`
+- [x] TypeScript Parser (完整型別檢查) - `src/frontend/parser.ts`
+- [x] IR Transformer (AST → IR) - `src/ir/transformer.ts`
+- [x] Go Code Generator (完整實作) - `src/backend/go-generator.ts`
+- [x] Type Mapper (多策略支援) - `src/backend/type-mapper.ts`
+- [x] Source Map 產生 - `src/backend/sourcemap.ts`
+- [x] Optimization System (死碼消除等) - `src/optimizer/optimizer.ts`
+- [x] Test Framework (Jest + Golden Tests) - `tests/`
+- [x] Differential Testing Tool - `tests/helpers/diff-tool.ts`
+- [x] Runtime Helpers (Go template) - `src/runtime/`
+- [x] CLI Tool (完整功能) - `src/cli.ts`
+- [x] 10 個黃金測試樣例 - `tests/golden/`
 
-### 🚧 進行中
-- [ ] 完整的 Mapped/Conditional Types
-- [ ] 更精確的型別推斷
-- [ ] 模組相依性解析
+### 🚧 進行中（In Development）
+- [ ] 完整的 Mapped/Conditional Types 支援
+- [ ] 更精確的型別推斷（基於 control flow）
+- [ ] 模組相依性完整解析（NPM packages）
 
-### 📋 未來計劃
-- [ ] 增量編譯
-- [ ] VS Code 擴充
-- [ ] 效能基準測試
-- [ ] NPM 套件對映
-- [ ] 社群型別庫
+### 📋 未來計劃（Roadmap）
+- [ ] 增量編譯（只編譯變更檔案）
+- [ ] VS Code 擴充套件
+- [ ] 效能基準測試與優化
+- [ ] NPM 套件對映庫（常見套件的 Go 等價物）
+- [ ] 社群型別定義庫
 
 ## 參考資料
 

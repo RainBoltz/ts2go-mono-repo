@@ -40,12 +40,21 @@ npm run dev          # Watch mode for development
 npm test             # Run all tests
 npm run test:golden  # Run golden tests only
 npm run test:unit    # Run unit tests only
+npm run test:e2e     # Run end-to-end tests
 
 # Run specific test file
 npx jest tests/golden/golden.test.ts
 
 # Run single test case
 npx jest -t "01-basic-types"
+
+# Run with coverage
+npm test -- --coverage
+```
+
+### Linting
+```bash
+npm run lint         # Run ESLint on source files
 ```
 
 ### CLI Usage
@@ -131,17 +140,17 @@ func (SuccessResult) isResult() {}
 
 ### Golden Tests (`tests/golden/`)
 
-10 comprehensive test cases covering:
-1. Basic types, arrays, tuples
-2. Interfaces, classes, inheritance
-3. Generics with constraints
-4. Union/Intersection types
-5. Async/await
-6. Error handling (try/catch → defer/error)
-7. Enums and namespaces
-8. Arrays and iterators
-9. Module system (import/export)
-10. Advanced types (mapped types, type guards)
+10 comprehensive test cases covering core TypeScript features:
+1. **01-basic-types**: Basic types, arrays, tuples, optional parameters
+2. **02-interfaces-classes**: Interfaces, classes, inheritance, static members
+3. **03-generics**: Generic functions, classes, constraints, multi-type parameters
+4. **04-union-intersection**: Union/Intersection types, type guards
+5. **05-async-await**: Promise, async/await, concurrent execution
+6. **06-error-handling**: Error handling, custom errors, Result pattern
+7. **07-enums-namespaces**: Enum, namespace, module merging
+8. **08-arrays-iterators**: Array operations, iterators, higher-order functions
+9. **09-modules-imports**: Module system, import/export
+10. **10-advanced-types**: Mapped types, type guards, conditional types
 
 Each test has:
 - Input: `tests/golden/XX-name.ts`
@@ -149,9 +158,13 @@ Each test has:
 
 ### Test Helpers
 
-- **`GoldenTestRunner`**: Compiles TS and compares with expected Go output
-- **`DifferentialTestRunner`**: Compares different compilation strategies
-- Custom Jest matchers: `toMatchGoCode()`, `toBeValidGo()`
+- **`GoldenTestRunner`** (`tests/helpers/golden-test.ts`): Compiles TS and compares with expected Go output
+  - `runGoldenTest()`: Execute single test case
+  - `runAllGoldenTests()`: Batch execution
+  - `updateExpected()`: Update expected output files
+- **`DifferentialTestRunner`** (`tests/helpers/diff-tool.ts`): Compares different compilation strategies
+- **Module Alias**: Tests use `@/` to reference `src/` directory
+- **Custom Jest Matchers**: `toMatchGoCode()`, `toBeValidGo()` (configured in `tests/setup.ts`)
 
 ## Runtime Helpers (`src/runtime/`)
 
@@ -203,15 +216,15 @@ When modifying the codebase:
 
 ### New IR Node Type
 1. Add node class to `src/ir/nodes.ts` extending appropriate base class
-2. Add visitor method to `IRVisitor<T>` interface
-3. Implement in `IRTransformer` (TS AST → IR)
-4. Implement in `GoCodeGenerator` (IR → Go)
-5. Add to `SymbolCollector` if used in dead code elimination
-6. Create golden test case
+2. Add visitor method to `IRVisitor<T>` interface (bottom of `nodes.ts`)
+3. Implement in `IRTransformer` (`src/ir/transformer.ts`) - TS AST → IR
+4. Implement in `GoCodeGenerator` (`src/backend/go-generator.ts`) - IR → Go
+5. Add to `SymbolCollector` if used in dead code elimination (`src/optimizer/optimizer.ts`)
+6. Create golden test case in `tests/golden/`
 
 ### New Type Mapping Strategy
 1. Add option to `CompilerOptions` in `src/config/options.ts`
-2. Implement logic in `TypeMapper.mapType()` or specialized methods
+2. Implement logic in `TypeMapper.mapType()` or specialized methods (`src/backend/type-mapper.ts`)
 3. Handle in `GoCodeGenerator` visitor methods
 4. Add differential test comparing strategies
 
@@ -219,3 +232,13 @@ When modifying the codebase:
 1. Create class implementing `OptimizationPass` in `src/optimizer/`
 2. Register in `IROptimizer.initializePasses()`
 3. Test with golden cases to ensure correctness
+
+## Development Utilities
+
+### Utility Scripts
+Several utility scripts exist in the root directory for testing and development:
+- `test-compile.js`: Quick compilation testing
+- `update-all-expected.js`: Update all golden test expected outputs
+- `test-*.js`: Various debugging and testing utilities
+
+These are development-only scripts and should not be committed for production use.
