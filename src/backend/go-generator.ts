@@ -29,6 +29,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private currentClassName = ''; // Track current class name for field name resolution
   private privateFieldNames = new Set<string>(); // Track private field names for the current class
   private fieldTypeMap = new Map<string, string>(); // Track field types (e.g., 'count' -> 'int')
+  private exportedNames = new Set<string>(); // Track names that are exported via export statements
+  private currentClassTypeParams: ir.TypeParameter[] = []; // Track current class type parameters for method receivers
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -57,6 +59,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.needsRuntime = false;
     this.tupleTypes.clear();
     this.generatedTupleTypes.clear();
+    this.exportedNames.clear();
   }
 
   /**
@@ -172,7 +175,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   private exportName(name: string, forceExport: boolean = false): string{
-    if (forceExport || this.hasModifier([], 'export')) {
+    if (forceExport || this.hasModifier([], 'export') || this.exportedNames.has(name)) {
       return this.capitalize(name);
     }
     return name;
@@ -187,7 +190,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitModule(node: ir.Module): string {
     let result = `package ${this.currentPackage}\n\n`;
 
-    // First pass: identify which statements will produce empty output
+    // First, collect exported names from export statements
+    for (const exportDecl of node.exports) {
+      if (exportDecl.specifiers) {
+        for (const spec of exportDecl.specifiers) {
+          // spec.local is the name in the module, spec.exported is the export name
+          this.exportedNames.add(spec.local);
+        }
+      }
+    }
+
+    // Second pass: identify which statements will produce empty output
     const isSkippedStatement: boolean[] = [];
     for (let i = 0; i < node.statements.length; i++) {
       const stmt = node.statements[i];
@@ -707,6 +720,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.currentClassName = name;
     this.privateFieldNames.clear();
     this.fieldTypeMap.clear();
+    this.currentClassTypeParams = node.typeParameters || [];
 
     // 型別參數
     let typeParams = '';
@@ -719,6 +733,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const staticMethods: ir.MethodMember[] = [];
     const instanceProperties: ir.PropertyMember[] = [];
     const instanceMethods: ir.MethodMember[] = [];
+    const genericMethods: ir.MethodMember[] = []; // Methods with their own type parameters (must be standalone functions)
 
     for (const member of node.members) {
       if (member instanceof ir.PropertyMember) {
@@ -737,8 +752,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         }
       } else if (member instanceof ir.MethodMember) {
         const isStatic = this.hasModifier(member.modifiers, 'static');
+        // Check if this method has its own type parameters (beyond class type parameters)
+        const hasOwnTypeParams = member.typeParameters && member.typeParameters.length > 0;
+
         if (isStatic) {
           staticMethods.push(member);
+        } else if (hasOwnTypeParams) {
+          // Methods with their own type parameters must become standalone functions in Go
+          genericMethods.push(member);
         } else {
           instanceMethods.push(member);
         }
@@ -836,7 +857,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // Generate module-level functions for static methods
     for (let i = 0; i < staticMethods.length; i++) {
       result += '\n\n' + this.generateStaticMethod(name, staticMethods[i]);
-      if (i < staticMethods.length - 1 || instanceMethods.length > 0) {
+      if (i < staticMethods.length - 1 || instanceMethods.length > 0 || genericMethods.length > 0) {
         result += '\n'; // One newline already added above for spacing
       }
     }
@@ -844,6 +865,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // Instance methods
     for (let i = 0; i < instanceMethods.length; i++) {
       result += '\n\n' + this.generateMethod(name, instanceMethods[i]);
+    }
+
+    // Generic methods (methods with their own type parameters) as standalone functions
+    for (let i = 0; i < genericMethods.length; i++) {
+      result += '\n\n' + this.generateGenericMethod(name, genericMethods[i]);
     }
 
     return result;
@@ -926,7 +952,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     const params = allParams.join(', ');
 
-    let result = `func New${className}(${params}) *${className} {\n`;
+    // Include type parameters in constructor signature
+    let typeParams = '';
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      typeParams = '[' + node.typeParameters.map(tp => tp.accept(this)).join(', ') + ']';
+    }
+
+    let result = `func New${className}${typeParams}(${params}) *${className}`;
+
+    // Add type arguments to return type if class has type parameters
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      const typeArgs = '[' + node.typeParameters.map(tp => tp.name).join(', ') + ']';
+      result += typeArgs;
+    }
+
+    result += ' {\n';
 
     // If there's a super() call with email parameter, create pointer variable
     if (superCall && node.extendsClause) {
@@ -1075,7 +1115,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     let receiver = '';
     const receiverName = className.charAt(0).toLowerCase();
     if (!isStatic) {
-      const receiverType = this.options.usePointerReceivers ? `*${className}` : className;
+      let receiverType = className;
+
+      // Add type arguments to receiver if class is generic
+      if (this.currentClassTypeParams.length > 0) {
+        const typeArgs = '[' + this.currentClassTypeParams.map(tp => tp.name).join(', ') + ']';
+        receiverType += typeArgs;
+      }
+
+      receiverType = this.options.usePointerReceivers ? `*${receiverType}` : receiverType;
       receiver = `(${receiverName} ${receiverType}) `;
       // Set current receiver name for 'this' replacement
       this.currentReceiverName = receiverName;
@@ -1191,6 +1239,89 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return `${signature} ${body}`;
     }
 
+    return signature;
+  }
+
+  private generateGenericMethod(className: string, node: ir.MethodMember): string {
+    const isAsync = this.hasModifier(node.modifiers, 'async');
+    const methodName = this.capitalize(node.name);
+    // Generate function name: Map → MapBox
+    const functionName = `${methodName}${className}`;
+
+    // Combine class type parameters with method's own type parameters
+    let allTypeParams: string[] = [];
+
+    // Add class type parameters first
+    if (this.currentClassTypeParams.length > 0) {
+      allTypeParams = this.currentClassTypeParams.map(tp => tp.accept(this));
+    }
+
+    // Add method's own type parameters
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      allTypeParams = allTypeParams.concat(node.typeParameters.map(tp => tp.accept(this)));
+    }
+
+    const typeParams = allTypeParams.length > 0 ? '[' + allTypeParams.join(', ') + ']' : '';
+
+    // Build receiver parameter as first parameter
+    const receiverName = className.charAt(0).toLowerCase();
+    let receiverType = `*${className}`;
+
+    // Add type arguments to receiver type if class is generic
+    if (this.currentClassTypeParams.length > 0) {
+      const typeArgs = '[' + this.currentClassTypeParams.map(tp => tp.name).join(', ') + ']';
+      receiverType += typeArgs;
+    }
+
+    const receiverParam = `${receiverName} ${receiverType}`;
+
+    // Regular parameters
+    const regularParams = node.parameters.map(p => this.visitParameter(p));
+
+    // Combine receiver with regular parameters
+    let allParams = [receiverParam].concat(regularParams).join(', ');
+
+    if (isAsync) {
+      this.needsContext = true;
+      this.addImport('context');
+      allParams = `ctx context.Context, ${allParams}`;
+    }
+
+    // Return type - need to handle generic return types
+    let returnType = '';
+    if (node.returnType && node.returnType.accept(this)) {
+      let baseReturnType = node.returnType.accept(this);
+
+      // If return type references the class with type parameters, add pointer
+      if (baseReturnType.startsWith(className)) {
+        if (!baseReturnType.startsWith(`*${className}`)) {
+          baseReturnType = `*${baseReturnType}`;
+        }
+      }
+
+      returnType = baseReturnType;
+      if (isAsync) {
+        returnType = `(${returnType}, error)`;
+      }
+    } else if (isAsync) {
+      returnType = 'error';
+    }
+
+    // Function signature
+    let signature = `func ${functionName}${typeParams}(${allParams})`;
+    if (returnType) {
+      signature += ` ${returnType}`;
+    }
+
+    // Function body - set receiver name for 'this' replacement
+    if (node.body) {
+      this.currentReceiverName = receiverName;
+      const body = this.visitBlockStatement(node.body);
+      this.currentReceiverName = '';
+      return `${signature} ${body}`;
+    }
+
+    this.currentReceiverName = '';
     return signature;
   }
 
@@ -1618,6 +1749,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return '';
     }
 
+    // Handle array.push() calls that need to be converted to assignment statements
+    if (node.expression instanceof ir.CallExpression) {
+      const callExpr = node.expression as ir.CallExpression;
+      if (callExpr.callee instanceof ir.MemberExpression) {
+        const memberExpr = callExpr.callee as ir.MemberExpression;
+        const methodName = memberExpr.property instanceof ir.Identifier
+          ? memberExpr.property.name
+          : null;
+
+        // Handle array.push() → array = append(array, element)
+        if (methodName === 'push') {
+          const arrayExpr = memberExpr.object.accept(this);
+          const args = callExpr.args.map(arg => arg.accept(this)).join(', ');
+          return `${arrayExpr} = append(${arrayExpr}, ${args})`;
+        }
+      }
+    }
+
     const expr = node.expression.accept(this);
     return expr;
   }
@@ -1813,6 +1962,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (node.name === 'this' && this.currentReceiverName) {
       return this.currentReceiverName;
     }
+    // Capitalize exported names (functions, classes, etc.)
+    if (this.exportedNames.has(node.name)) {
+      return this.capitalize(node.name);
+    }
     return node.name;
   }
 
@@ -1892,6 +2045,32 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitCallExpression(node: ir.CallExpression): string {
+    // Handle array methods that need special treatment in Go
+    if (node.callee instanceof ir.MemberExpression) {
+      const memberExpr = node.callee as ir.MemberExpression;
+      const methodName = memberExpr.property instanceof ir.Identifier
+        ? memberExpr.property.name
+        : null;
+
+      // Handle array.push() → append(array, element)
+      if (methodName === 'push' || methodName === 'Push') {
+        const arrayExpr = memberExpr.object.accept(this);
+        const args = node.args.map(arg => arg.accept(this)).join(', ');
+        // Return the append call - note that this returns a new array
+        // In statements like `result.push(x)`, this will generate `result = append(result, x)`
+        return `append(${arrayExpr}, ${args})`;
+      }
+
+      // Handle console.log() → fmt.Println()
+      if (memberExpr.object instanceof ir.Identifier &&
+          memberExpr.object.name === 'console' &&
+          methodName === 'log') {
+        this.addImport('fmt');
+        const args = node.args.map(arg => arg.accept(this)).join(', ');
+        return `fmt.Println(${args})`;
+      }
+    }
+
     const callee = node.callee.accept(this);
     const args = node.args.map(arg => arg.accept(this)).join(', ');
 

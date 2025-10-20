@@ -2,9 +2,9 @@ package main
 
 import "fmt"
 
-var strr string = "hello"
-var numm float64 = 42
-var boool bool = true
+var Strr string = "hello"
+var Numm float64 = 42
+var Boool bool = true
 var nothing interface{} = nil
 
 var inferredString = "world"
@@ -33,7 +33,7 @@ type Tuple3_string_float64_bool struct {
 
 var tuple3 = Tuple3_string_float64_bool{"test", 1, true}
 
-func greet(name string, age *float64, title string) string {
+func Greet(name string, age *float64, title string) string {
 	if title == "" {
 		title = "Mr."
 	}
