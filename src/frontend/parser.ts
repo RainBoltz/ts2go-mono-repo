@@ -143,6 +143,16 @@ export class TypeScriptParser {
    */
   getSourceLocation(node: ts.Node): SourceLocation {
     const sourceFile = node.getSourceFile();
+
+    // Handle synthetic nodes (created by typeToTypeNode, etc.) that don't have source files
+    if (!sourceFile) {
+      return new SourceLocation(
+        '<synthetic>',
+        new Position(0, 0, 0),
+        new Position(0, 0, 0)
+      );
+    }
+
     const start = sourceFile.getLineAndCharacterOfPosition(node.getStart());
     const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
 

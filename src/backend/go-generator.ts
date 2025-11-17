@@ -979,7 +979,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
     }
 
-    result += `${this.indent()}\treturn &${className}{\n`;
+    // Add type arguments to struct literal if class has type parameters
+    let structType = className;
+    if (node.typeParameters && node.typeParameters.length > 0) {
+      const typeArgs = '[' + node.typeParameters.map(tp => tp.name).join(', ') + ']';
+      structType += typeArgs;
+    }
+
+    result += `${this.indent()}\treturn &${structType}{\n`;
 
     // Calculate max field name length for alignment (including parent class name if present)
     let maxFieldNameLen = properties.length > 0
