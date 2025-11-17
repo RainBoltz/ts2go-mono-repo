@@ -2250,6 +2250,19 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         } else {
           property = this.capitalize(propName); // Capitalize public fields
         }
+
+        // Heuristic: Convert common property names to method calls if likely from interface
+        // This handles the case where interface properties became getter methods
+        // TODO: Use type information to be more precise
+        const propertyToMethod: {[key: string]: string} = {
+          'Length': 'Len()',
+          'length': 'Len()',
+        };
+
+        // Only convert if this is not in the current class context (i.e., not accessing own fields)
+        if (propertyToMethod[property] && !this.fieldTypeMap.has(propName)) {
+          return `${object}.${propertyToMethod[property]}`;
+        }
       } else {
         property = node.property.accept(this);
       }

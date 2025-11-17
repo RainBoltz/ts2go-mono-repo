@@ -748,9 +748,23 @@ export class IRTransformer {
 
   private transformParameter(param: ts.ParameterDeclaration): ir.Parameter {
     const name = ts.isIdentifier(param.name) ? param.name.text : 'unknown';
+
+    // Try to get type from annotation or infer it
+    let paramType: ir.IRType | undefined = param.type ? this.transformTypeNode(param.type) : undefined;
+
+    // If no explicit type, try to infer from TypeScript type checker
+    if (!paramType && this.typeChecker) {
+      try {
+        const tsType = this.typeChecker.getTypeAtLocation(param);
+        paramType = this.tsTypeToIRType(tsType, param);
+      } catch (e) {
+        // If type inference fails, leave as undefined
+      }
+    }
+
     return new ir.Parameter(
       name,
-      param.type ? this.transformTypeNode(param.type) : undefined,
+      paramType,
       !!param.questionToken,
       param.initializer ? this.transformExpression(param.initializer) : undefined,
       !!param.dotDotDotToken,
