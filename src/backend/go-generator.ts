@@ -2085,16 +2085,39 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitArrayExpression(node: ir.ArrayExpression): string {
-    const elements = node.elements
-      .map(e => e ? e.accept(this) : 'nil')
-      .join(', ');
+    // Check if any elements are spread elements
+    const hasSpread = node.elements.some(e => e instanceof ir.SpreadElement);
 
     // 嘗試推斷型別
     const elementType = node.inferredType instanceof ir.ArrayType ?
       node.inferredType.elementType.accept(this) :
       'interface{}';
 
-    return `[]${elementType}{${elements}}`;
+    if (hasSpread) {
+      // Handle spread elements using append
+      // [...arr] becomes append([]T{}, arr...)
+      // [a, ...arr, b] becomes append(append([]T{a}, arr...), b)
+      let result = `[]${elementType}{}`;
+
+      for (const elem of node.elements) {
+        if (elem instanceof ir.SpreadElement) {
+          const spreadArg = elem.argument.accept(this);
+          result = `append(${result}, ${spreadArg}...)`;
+        } else if (elem) {
+          const elemCode = elem.accept(this);
+          result = `append(${result}, ${elemCode})`;
+        }
+      }
+
+      return result;
+    } else {
+      // No spread elements, use regular array literal
+      const elements = node.elements
+        .map(e => e ? e.accept(this) : 'nil')
+        .join(', ');
+
+      return `[]${elementType}{${elements}}`;
+    }
   }
 
   visitObjectExpression(node: ir.ObjectExpression): string {
