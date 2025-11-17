@@ -185,6 +185,58 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return modifiers.some(m => m.kind === kind);
   }
 
+  /**
+   * Infer array element type from literal elements
+   * Used when IR doesn't provide type information
+   */
+  private inferArrayElementType(elements: (ir.Expression | ir.SpreadElement | null)[]): string {
+    if (elements.length === 0) {
+      return 'interface{}';
+    }
+
+    // Filter out null and spread elements
+    const literalElements = elements.filter(e => e && !(e instanceof ir.SpreadElement)) as ir.Expression[];
+
+    if (literalElements.length === 0) {
+      return 'interface{}';
+    }
+
+    // Check if all elements are numeric literals
+    const allNumeric = literalElements.every(e =>
+      e instanceof ir.Literal && typeof (e as ir.Literal).value === 'number'
+    );
+
+    if (allNumeric) {
+      // Check if any number has a decimal point
+      const hasFloat = literalElements.some(e => {
+        const value = (e as ir.Literal).value;
+        return typeof value === 'number' && !Number.isInteger(value);
+      });
+      return hasFloat ? 'float64' : 'int';
+    }
+
+    // Check if all elements are string literals
+    const allString = literalElements.every(e =>
+      e instanceof ir.Literal && typeof (e as ir.Literal).value === 'string'
+    );
+
+    if (allString) {
+      return 'string';
+    }
+
+    // Check if all elements are boolean literals
+    const allBoolean = literalElements.every(e =>
+      e instanceof ir.Literal && typeof (e as ir.Literal).value === 'boolean'
+    );
+
+    if (allBoolean) {
+      return 'bool';
+    }
+
+    // Mixed types or non-literal expressions
+    return 'interface{}';
+  }
+
   // ============= Module =============
 
   visitModule(node: ir.Module): string {
@@ -760,7 +812,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitClassDeclaration(node: ir.ClassDeclaration): string {
-    const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+    let name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
+
+    // Check if class implements Iterable or Iterator - rename to avoid common collisions
+    const implementsIterable = node.implementsClause?.some(impl => {
+      if (impl instanceof ir.TypeReference) {
+        return impl.name === 'Iterable' || impl.name === 'Iterator' ||
+               impl.name === 'AsyncIterable' || impl.name === 'AsyncIterator';
+      }
+      return false;
+    });
+
+    if (implementsIterable && !name.endsWith('Iterator')) {
+      name = `${name}Iterator`;
+    }
+
     let result = '';
 
     // Set current class context for field name resolution
@@ -2112,9 +2178,13 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const hasSpread = node.elements.some(e => e instanceof ir.SpreadElement);
 
     // 嘗試推斷型別
-    const elementType = node.inferredType instanceof ir.ArrayType ?
-      node.inferredType.elementType.accept(this) :
-      'interface{}';
+    let elementType: string;
+    if (node.inferredType instanceof ir.ArrayType) {
+      elementType = node.inferredType.elementType.accept(this);
+    } else {
+      // Fallback: infer from literal elements
+      elementType = this.inferArrayElementType(node.elements);
+    }
 
     if (hasSpread) {
       // Handle spread elements using append
