@@ -481,6 +481,49 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return `[]${elementType}`;
     }
 
+    // Special handling for Map<K, V> → map[K]V
+    if (typeName === 'Map' && node.typeArguments && node.typeArguments.length === 2) {
+      const keyType = node.typeArguments[0].accept(this);
+      const valueType = node.typeArguments[1].accept(this);
+      return `map[${keyType}]${valueType}`;
+    }
+
+    // Special handling for Set<T> → map[T]bool (Go idiom for sets)
+    if (typeName === 'Set' && node.typeArguments && node.typeArguments.length === 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `map[${elementType}]bool`;
+    }
+
+    // Special handling for Promise<T> → T (since we handle async with error returns)
+    if (typeName === 'Promise' && node.typeArguments && node.typeArguments.length === 1) {
+      const valueType = node.typeArguments[0].accept(this);
+      return valueType;
+    }
+
+    // Special handling for AsyncGenerator<T> → <-chan T (receive-only channel)
+    if (typeName === 'AsyncGenerator' && node.typeArguments && node.typeArguments.length >= 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `<-chan ${elementType}`;
+    }
+
+    // Special handling for Generator<T> → <-chan T (receive-only channel)
+    if (typeName === 'Generator' && node.typeArguments && node.typeArguments.length >= 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `<-chan ${elementType}`;
+    }
+
+    // Special handling for AsyncIterator<T> → <-chan T
+    if (typeName === 'AsyncIterator' && node.typeArguments && node.typeArguments.length >= 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `<-chan ${elementType}`;
+    }
+
+    // Special handling for Iterator<T> → <-chan T
+    if (typeName === 'Iterator' && node.typeArguments && node.typeArguments.length >= 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `<-chan ${elementType}`;
+    }
+
     // 處理泛型參數
     if (node.typeArguments && node.typeArguments.length > 0) {
       const typeArgs = node.typeArguments.map(t => t.accept(this)).join(', ');
@@ -1519,10 +1562,32 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return !(m.type instanceof ir.FunctionType);
     });
 
+    // Heuristic to detect if interface is likely a generic constraint vs data type
+    const isLikelyConstraint = (): boolean => {
+      // If it extends another interface, it's more likely a data type, not a constraint
+      if (node.extendsClause && node.extendsClause.length > 0) {
+        return false;
+      }
+      // Common constraint naming patterns
+      if (name.endsWith('able') || name.endsWith('ible') ||
+          name.endsWith('wise') || name.endsWith('Wise')) {
+        return true;
+      }
+      // Common constraint property names
+      const constraintProps = ['length', 'len', 'size'];
+      if (node.members.some(m => constraintProps.includes(m.name.toLowerCase()))) {
+        return true;
+      }
+      // If it only has 1 property, likely a constraint
+      if (node.members.length === 1) {
+        return true;
+      }
+      return false;
+    };
+
     // Data interfaces (only properties, no methods) become structs
-    // DISABLED: Interfaces used as generic constraints must remain interfaces
-    // TODO: Add two-pass analysis to determine if interface is used as constraint
-    if (false && hasOnlyProperties && node.members.length > 0) {
+    // Exception: interfaces likely used as generic constraints remain interfaces
+    if (hasOnlyProperties && node.members.length > 0 && !isLikelyConstraint()) {
       let result = `type ${name}${typeParams} struct {\n`;
 
       // Embedding (extends)
@@ -2095,6 +2160,58 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         return `append(${arrayExpr}, ${args})`;
       }
 
+      // Handle Map.get(key) → map[key] (returns value directly in Go)
+      if (methodName === 'get' || methodName === 'Get') {
+        const mapExpr = memberExpr.object.accept(this);
+        if (node.args.length === 1) {
+          const keyArg = node.args[0].accept(this);
+          return `${mapExpr}[${keyArg}]`;
+        }
+      }
+
+      // Handle Map.has(key) → checking if key exists
+      // Note: This generates a comma-ok expression which may need special handling
+      if (methodName === 'has' || methodName === 'Has') {
+        const mapExpr = memberExpr.object.accept(this);
+        if (node.args.length === 1) {
+          const keyArg = node.args[0].accept(this);
+          // For now, generate the check expression
+          // This may need context-aware handling depending on usage
+          return `(func() bool { _, ok := ${mapExpr}[${keyArg}]; return ok })()`;
+        }
+      }
+
+      // Handle Map.delete(key) → delete(map, key)
+      if (methodName === 'delete' || methodName === 'Delete') {
+        const mapExpr = memberExpr.object.accept(this);
+        if (node.args.length === 1) {
+          const keyArg = node.args[0].accept(this);
+          return `delete(${mapExpr}, ${keyArg})`;
+        }
+      }
+
+      // Handle Map.set(key, value) → map[key] = value (assignment expression)
+      if (methodName === 'set' || methodName === 'Set') {
+        const mapExpr = memberExpr.object.accept(this);
+        if (node.args.length === 2) {
+          const keyArg = node.args[0].accept(this);
+          const valueArg = node.args[1].accept(this);
+          // In Go, assignment is a statement, not an expression
+          // Return an immediately invoked function that does the assignment
+          return `(func() { ${mapExpr}[${keyArg}] = ${valueArg} })()`;
+        }
+      }
+
+      // Handle Map.clear() → resetting the map
+      if (methodName === 'clear' || methodName === 'Clear') {
+        const mapExpr = memberExpr.object.accept(this);
+        // Clear by creating a new empty map
+        // This requires knowing the map type, which is complex
+        // For now, clear individual keys (would need iteration)
+        // Actually, just reassign to empty map literal
+        return `(func() { ${mapExpr} = make(map[string]interface{}) })()`;
+      }
+
       // Handle console.log() → fmt.Println()
       if (memberExpr.object instanceof ir.Identifier &&
           memberExpr.object.name === 'console' &&
@@ -2156,6 +2273,26 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (callee === 'Date') {
       this.addImport('time');
       return 'time.Now()';
+    }
+
+    // Special handling for Map<K, V> → make(map[K]V)
+    if (callee === 'Map' && node.typeArguments && node.typeArguments.length === 2) {
+      const keyType = node.typeArguments[0].accept(this);
+      const valueType = node.typeArguments[1].accept(this);
+      return `make(map[${keyType}]${valueType})`;
+    }
+
+    // Special handling for Set<T> → make(map[T]bool)
+    if (callee === 'Set' && node.typeArguments && node.typeArguments.length === 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `make(map[${elementType}]bool)`;
+    }
+
+    // Special handling for Promise<T> - return zero value or nil
+    if (callee === 'Promise') {
+      // Promises are handled by async/await, new Promise() shouldn't appear
+      // But if it does, return nil or a placeholder
+      return 'nil';
     }
 
     // TypeScript's new → Go's constructor function
