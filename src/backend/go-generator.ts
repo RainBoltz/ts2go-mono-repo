@@ -1766,14 +1766,37 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitEnumDeclaration(node: ir.EnumDeclaration): string {
     const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
 
-    // 判斷是字串 enum 還是數字 enum
-    const isStringEnum = node.members.some(m =>
+    // Detect enum type: numeric, string, or mixed
+    const hasString = node.members.some(m =>
       m.value instanceof ir.Literal && typeof (m.value as ir.Literal).value === 'string'
     );
+    const hasNumeric = node.members.some(m =>
+      !m.value || (m.value instanceof ir.Literal && typeof (m.value as ir.Literal).value === 'number')
+    );
+
+    const isMixedEnum = hasString && hasNumeric;
+    const isStringEnum = hasString && !hasNumeric;
 
     let result = '';
 
-    if (isStringEnum) {
+    if (isMixedEnum) {
+      // Mixed enum: Use tagged union pattern
+      result += `type ${name} interface {\n`;
+      result += `\tis${name}()\n`;
+      result += '}\n\n';
+
+      for (const member of node.members) {
+        const memberName = `${name}${this.capitalize(member.name)}`;
+        result += `type ${memberName} struct{}\n\n`;
+        result += `func (${memberName}) is${name}() {}\n\n`;
+
+        const value = member.value ? member.value.accept(this) : '0';
+        result += `const ${memberName}Value = ${value}\n\n`;
+      }
+
+      // Remove trailing newlines
+      result = result.trimEnd();
+    } else if (isStringEnum) {
       // String enum
       result += `type ${name} string\n\n`;
       result += 'const (\n';
