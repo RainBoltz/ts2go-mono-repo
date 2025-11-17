@@ -623,7 +623,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 返回型別
     let returnType = '';
-    if (node.returnType && node.returnType.accept(this)) {
+    // Check if return type is void - in Go, void functions have no return type
+    const isVoidReturn = node.returnType instanceof ir.PrimitiveType &&
+                         (node.returnType as ir.PrimitiveType).kind === 'void';
+
+    if (node.returnType && !isVoidReturn) {
       returnType = node.returnType.accept(this);
       if (isAsync) {
         returnType = `(${returnType}, error)`;
@@ -1152,7 +1156,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 返回型別
     let returnType = '';
-    if (node.returnType && node.returnType.accept(this)) {
+    // Check if return type is void - in Go, void functions have no return type
+    const isVoidReturn = node.returnType instanceof ir.PrimitiveType &&
+                         (node.returnType as ir.PrimitiveType).kind === 'void';
+
+    if (node.returnType && !isVoidReturn) {
       let baseReturnType = node.returnType.accept(this);
 
       // Check if the return type is 'number' and if this method returns an int-typed field
@@ -1512,13 +1520,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     });
 
     // Data interfaces (only properties, no methods) become structs
-    if (hasOnlyProperties && node.members.length > 0) {
+    // DISABLED: Interfaces used as generic constraints must remain interfaces
+    // TODO: Add two-pass analysis to determine if interface is used as constraint
+    if (false && hasOnlyProperties && node.members.length > 0) {
       let result = `type ${name}${typeParams} struct {\n`;
 
       // Embedding (extends)
-      if (node.extendsClause && node.extendsClause.length > 0) {
+      if (node.extendsClause && node.extendsClause!.length > 0) {
         this.increaseIndent();
-        for (const ext of node.extendsClause) {
+        for (const ext of node.extendsClause!) {
           // For interface extends, just embed the type name directly
           const extTypeName = (ext as ir.TypeReference).name;
           result += `${this.indent()}${extTypeName}\n`;
@@ -1564,17 +1574,34 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.increaseIndent();
     for (const member of node.members) {
       const methodName = this.capitalize(member.name);
-      const typeName = member.type.accept(this);
 
       // 如果是 function type，展開為方法簽名
       if (member.type instanceof ir.FunctionType) {
         const funcType = member.type;
         const params = funcType.parameters.map(p => this.visitParameter(p)).join(', ');
-        const returnType = funcType.returnType.accept(this);
-        result += `${this.indent()}${methodName}(${params}) ${returnType}\n`;
+
+        // Check if return type is void - in Go, void functions have no return type
+        const isVoidReturn = funcType.returnType instanceof ir.PrimitiveType &&
+                             (funcType.returnType as ir.PrimitiveType).kind === 'void';
+
+        if (isVoidReturn) {
+          result += `${this.indent()}${methodName}(${params})\n`;
+        } else {
+          const returnType = funcType.returnType.accept(this);
+          result += `${this.indent()}${methodName}(${params}) ${returnType}\n`;
+        }
       } else {
-        // Getter 方法
-        result += `${this.indent()}${methodName}() ${typeName}\n`;
+        // For properties, generate a getter method
+        // This allows property-only interfaces to work as generic constraints
+        const typeName = member.type.accept(this);
+        // Use Go naming convention: capitalize first letter of property name
+        // e.g., "length" -> "Len()" for idiomatic Go
+        let getterName = methodName;
+        // Special case: shorten common property names to Go idioms
+        if (getterName === 'Length') {
+          getterName = 'Len';
+        }
+        result += `${this.indent()}${getterName}() ${typeName}\n`;
       }
     }
     this.decreaseIndent();
