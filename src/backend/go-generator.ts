@@ -31,6 +31,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private fieldTypeMap = new Map<string, string>(); // Track field types (e.g., 'count' -> 'int')
   private exportedNames = new Set<string>(); // Track names that are exported via export statements
   private currentClassTypeParams: ir.TypeParameter[] = []; // Track current class type parameters for method receivers
+  private typeAliasMap = new Map<string, ir.IRType>(); // Track type alias definitions (e.g., Person -> IntersectionType)
+  private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -60,6 +62,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.tupleTypes.clear();
     this.generatedTupleTypes.clear();
     this.exportedNames.clear();
+    this.typeAliasMap.clear();
+    this.interfaceProperties.clear();
   }
 
   /**
@@ -690,6 +694,59 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
                     node.type instanceof ir.IntersectionType ||
                     node.type instanceof ir.ObjectType) &&
                    node.initializer instanceof ir.ObjectExpression) {
+          // Check if this is a type alias to an intersection type
+          let intersectionType: ir.IntersectionType | null = null;
+          if (node.type instanceof ir.IntersectionType) {
+            intersectionType = node.type;
+          } else if (node.type instanceof ir.TypeReference) {
+            const aliasedType = this.typeAliasMap.get(node.type.name);
+            if (aliasedType instanceof ir.IntersectionType) {
+              intersectionType = aliasedType;
+            }
+          }
+
+          // Special handling for intersection types with embedded structs
+          if (intersectionType) {
+            // Group properties by their likely interface based on naming heuristics
+            const intersectionTypes = intersectionType.types;
+            const properties = node.initializer.properties;
+
+            // Build embedded struct initializers
+            const embeddedInits: string[] = [];
+            const usedProps = new Set<string>();
+
+            for (const intType of intersectionTypes) {
+              if (intType instanceof ir.TypeReference) {
+                const interfaceName = intType.name;
+                const interfaceProps = this.interfaceProperties.get(interfaceName);
+
+                if (interfaceProps) {
+                  // Find properties that belong to this interface based on tracked members
+                  const matchingProps = properties.filter(p => {
+                    if (!(p.key instanceof ir.Identifier)) return false;
+                    const propName = p.key.name;
+                    if (usedProps.has(propName)) return false;
+                    return interfaceProps.has(propName);
+                  });
+
+                  if (matchingProps.length > 0) {
+                    const propInits = matchingProps.map(p => {
+                      const key = p.key instanceof ir.Identifier ?
+                        this.capitalize(p.key.name) : p.key.accept(this);
+                      const value = p.value.accept(this);
+                      usedProps.add((p.key as ir.Identifier).name);
+                      return `${key}: ${value}`;
+                    }).join(', ');
+                    embeddedInits.push(`${interfaceName}: ${interfaceName}{${propInits}}`);
+                  }
+                }
+              }
+            }
+
+            init = `${typeName}{\n${this.indent()}\t${embeddedInits.join(',\n' + this.indent() + '\t')},\n${this.indent()}}`;
+            return `${tupleTypeDef}var ${name} = ${init}`;
+          }
+
           // Generate struct literal for object initializers
           const props = node.initializer.properties.map(p => {
             const key = p.key instanceof ir.Identifier ?
@@ -1652,6 +1709,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitInterfaceDeclaration(node: ir.InterfaceDeclaration): string {
     const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
 
+    // Track interface properties for intersection type initialization
+    const propNames = new Set<string>();
+    for (const member of node.members) {
+      if (!(member.type instanceof ir.FunctionType)) {
+        propNames.add(member.name);
+      }
+    }
+    this.interfaceProperties.set(node.name, propNames);
+
     // 型別參數
     let typeParams = '';
     if (node.typeParameters && node.typeParameters.length > 0) {
@@ -1700,9 +1766,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       if (node.members.some(m => constraintProps.includes(m.name.toLowerCase()))) {
         return true;
       }
-      // If it only has 1 property, likely a constraint
+      // If it only has 1 property, check if it's a typical data property
       if (node.members.length === 1) {
-        return true;
+        const propName = node.members[0].name.toLowerCase();
+        // Common data property names that should become structs, not constraints
+        const dataProps = ['name', 'age', 'address', 'id', 'value', 'title', 'description', 'email'];
+        if (dataProps.includes(propName)) {
+          return false; // Treat as data interface (struct), not constraint
+        }
+        return true; // Otherwise treat single-property as constraint
       }
       return false;
     };
@@ -1801,6 +1873,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitTypeAliasDeclaration(node: ir.TypeAliasDeclaration): string {
     const name = this.exportName(node.name, this.hasModifier(node.modifiers, 'export'));
 
+    // Track type alias for later reference (used for intersection type initialization)
+    this.typeAliasMap.set(node.name, node.type);
+
     // 型別參數
     let typeParams = '';
     if (node.typeParameters && node.typeParameters.length > 0) {
@@ -1820,7 +1895,101 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return `type ${name}${typeParams} ${typeName}`;
   }
 
+  /**
+   * Get a semantic name for a type (e.g., "String" for string, "Number" for number)
+   * Used for generating union type method names like IsString(), AsString()
+   */
+  private getSemanticTypeName(type: ir.IRType): string {
+    if (type instanceof ir.PrimitiveType) {
+      const primitiveMap: Record<string, string> = {
+        'string': 'String',
+        'number': 'Number',
+        'boolean': 'Boolean',
+        'void': 'Void',
+        'any': 'Any',
+        'unknown': 'Unknown',
+        'never': 'Never',
+        'null': 'Null',
+        'undefined': 'Undefined'
+      };
+      return primitiveMap[type.kind] || this.capitalize(type.kind);
+    }
+
+    if (type instanceof ir.TypeReference) {
+      return type.name;
+    }
+
+    if (type instanceof ir.ArrayType) {
+      return 'Array';
+    }
+
+    if (type instanceof ir.FunctionType) {
+      return 'Function';
+    }
+
+    return 'Value';
+  }
+
+  /**
+   * Get a semantic field name for a type (e.g., "str" for string, "number" for number)
+   * Used for generating union type field names
+   */
+  private getSemanticFieldName(type: ir.IRType): string {
+    if (type instanceof ir.PrimitiveType) {
+      const fieldMap: Record<string, string> = {
+        'string': 'str',
+        'number': 'number',
+        'boolean': 'bool',
+        'any': 'any'
+      };
+      return fieldMap[type.kind] || type.kind.toLowerCase();
+    }
+
+    if (type instanceof ir.TypeReference) {
+      return type.name.charAt(0).toLowerCase() + type.name.slice(1);
+    }
+
+    return 'value';
+  }
+
   private generateUnionType(name: string, union: ir.UnionType, typeParams: string): string {
+    // Check if this is a union of string/number literal types - convert to type alias + const
+    const allLiterals = union.types.every(t => t instanceof ir.LiteralType);
+    if (allLiterals && union.types.length > 0) {
+      const firstLiteral = union.types[0] as ir.LiteralType;
+      const literalType = typeof firstLiteral.value;
+      const allSameType = union.types.every(t =>
+        t instanceof ir.LiteralType && typeof (t as ir.LiteralType).value === literalType
+      );
+
+      if (allSameType) {
+        let result = '';
+        if (literalType === 'string') {
+          result += `type ${name} string\n\n`;
+          result += 'const (\n';
+          for (const type of union.types) {
+            const literal = type as ir.LiteralType;
+            const value = literal.value as string;
+            const constName = `${name}${this.capitalize(value)}`;
+            result += `\t${constName} ${name} = "${value}"\n`;
+          }
+          result += ')';
+          return result;
+        } else if (literalType === 'number') {
+          result += `type ${name} int\n\n`;
+          result += 'const (\n';
+          for (const type of union.types) {
+            const literal = type as ir.LiteralType;
+            const value = literal.value as number;
+            const constName = `${name}${value}`;
+            result += `\t${constName} ${name} = ${value}\n`;
+          }
+          result += ')';
+          return result;
+        }
+      }
+    }
+
     switch (this.options.unionStrategy) {
       case 'interface':
         // Interface-based discriminated union
@@ -1843,25 +2012,68 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
       case 'tagged':
       default:
-        // Tagged union
+        // Tagged union with semantic names
         let taggedResult = `type ${name}${typeParams} struct {\n`;
-        taggedResult += '\ttag int\n';
+        taggedResult += '\ttag    int\n';
 
+        // Generate fields with semantic names
         for (let i = 0; i < union.types.length; i++) {
-          const typeName = union.types[i].accept(this);
-          taggedResult += `\tvalue${i} *${typeName}\n`;
+          const type = union.types[i];
+          const typeName = type.accept(this);
+          const fieldName = this.getSemanticFieldName(type);
+          taggedResult += `\t${fieldName}    *${typeName}\n`;
         }
 
         taggedResult += '}\n\n';
 
-        // Helper methods
+        // Generate constructor functions
         for (let i = 0; i < union.types.length; i++) {
-          const typeName = union.types[i].accept(this);
-          taggedResult += `func (u ${name}) IsType${i}() bool { return u.tag == ${i} }\n`;
-          taggedResult += `func (u ${name}) AsType${i}() ${typeName} {\n`;
-          taggedResult += `\tif u.value${i} != nil { return *u.value${i} }\n`;
-          taggedResult += `\tvar zero ${typeName}\n`;
-          taggedResult += `\treturn zero\n`;
+          const type = union.types[i];
+          const typeName = type.accept(this);
+          const semanticName = this.getSemanticTypeName(type);
+          const fieldName = this.getSemanticFieldName(type);
+          taggedResult += `func New${name}From${semanticName}(v ${typeName}) ${name} {\n`;
+          taggedResult += `\treturn ${name}{tag: ${i}, ${fieldName}: &v}\n`;
+          taggedResult += '}\n\n';
+        }
+
+        // Generate type guard methods
+        for (let i = 0; i < union.types.length; i++) {
+          const type = union.types[i];
+          const semanticName = this.getSemanticTypeName(type);
+          taggedResult += `func (u ${name}) Is${semanticName}() bool {\n`;
+          taggedResult += `\treturn u.tag == ${i}\n`;
+          taggedResult += '}\n\n';
+        }
+
+        // Generate accessor methods
+        for (let i = 0; i < union.types.length; i++) {
+          const type = union.types[i];
+          const typeName = type.accept(this);
+          const semanticName = this.getSemanticTypeName(type);
+          const fieldName = this.getSemanticFieldName(type);
+          taggedResult += `func (u ${name}) As${semanticName}() ${typeName} {\n`;
+          taggedResult += `\tif u.${fieldName} != nil {\n`;
+          taggedResult += `\t\treturn *u.${fieldName}\n`;
+          taggedResult += '\t}\n';
+
+          // Return appropriate zero value
+          if (type instanceof ir.PrimitiveType) {
+            if (type.kind === 'string') {
+              taggedResult += '\treturn ""\n';
+            } else if (type.kind === 'number') {
+              taggedResult += '\treturn 0\n';
+            } else if (type.kind === 'boolean') {
+              taggedResult += '\treturn false\n';
+            } else {
+              taggedResult += `\tvar zero ${typeName}\n`;
+              taggedResult += '\treturn zero\n';
+            }
+          } else {
+            taggedResult += `\tvar zero ${typeName}\n`;
+            taggedResult += '\treturn zero\n';
+          }
+
           taggedResult += '}\n\n';
         }
 
@@ -2515,6 +2727,98 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitBinaryExpression(node: ir.BinaryExpression): string {
+    // Special handling for typeof comparisons on union types
+    // Pattern: typeof value === 'string' → value.IsString()
+    if ((node.operator === '===' || node.operator === '==') &&
+        node.left instanceof ir.UnaryExpression && node.left.operator === 'typeof' &&
+        node.right instanceof ir.Literal && typeof node.right.value === 'string') {
+
+      const arg = node.left.argument;
+      const typeName = node.right.value as string;
+
+      // Check if the argument has a union type (directly or via type reference)
+      let unionType: ir.UnionType | null = null;
+      if (arg.inferredType) {
+        if (arg.inferredType instanceof ir.UnionType) {
+          unionType = arg.inferredType;
+        } else if (arg.inferredType instanceof ir.TypeReference) {
+          // Check if the type reference points to a union type
+          const aliasedType = this.typeAliasMap.get(arg.inferredType.name);
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+          }
+        }
+      }
+
+      if (unionType) {
+
+        // Find the matching type in the union
+        for (const type of unionType.types) {
+          let matchesType = false;
+
+          if (type instanceof ir.PrimitiveType) {
+            if (type.kind === typeName) {
+              matchesType = true;
+            }
+          } else if (type instanceof ir.TypeReference) {
+            if (type.name.toLowerCase() === typeName.toLowerCase()) {
+              matchesType = true;
+            }
+          }
+
+          if (matchesType) {
+            const semanticName = this.getSemanticTypeName(type);
+            const varName = arg.accept(this);
+            return `${varName}.Is${semanticName}()`;
+          }
+        }
+      }
+    }
+
+    // Handle !== and != for typeof
+    if ((node.operator === '!==' || node.operator === '!=') &&
+        node.left instanceof ir.UnaryExpression && node.left.operator === 'typeof' &&
+        node.right instanceof ir.Literal && typeof node.right.value === 'string') {
+
+      const arg = node.left.argument;
+      const typeName = node.right.value as string;
+
+      let unionType: ir.UnionType | null = null;
+      if (arg.inferredType) {
+        if (arg.inferredType instanceof ir.UnionType) {
+          unionType = arg.inferredType;
+        } else if (arg.inferredType instanceof ir.TypeReference) {
+          const aliasedType = this.typeAliasMap.get(arg.inferredType.name);
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+          }
+        }
+      }
+
+      if (unionType) {
+
+        for (const type of unionType.types) {
+          let matchesType = false;
+
+          if (type instanceof ir.PrimitiveType) {
+            if (type.kind === typeName) {
+              matchesType = true;
+            }
+          } else if (type instanceof ir.TypeReference) {
+            if (type.name.toLowerCase() === typeName.toLowerCase()) {
+              matchesType = true;
+            }
+          }
+
+          if (matchesType) {
+            const semanticName = this.getSemanticTypeName(type);
+            const varName = arg.accept(this);
+            return `!${varName}.Is${semanticName}()`;
+          }
+        }
+      }
+    }
+
     const left = node.left.accept(this);
     const right = node.right.accept(this);
 

@@ -738,6 +738,26 @@ export class IRTransformer {
       case ts.SyntaxKind.TemplateExpression:
         return this.transformTemplateExpression(node as ts.TemplateExpression);
 
+      case ts.SyntaxKind.TypeOfExpression:
+        const typeofExpr = node as ts.TypeOfExpression;
+        const expr = this.transformExpression(typeofExpr.expression);
+        // Try to infer the type of the expression for union type guard optimization
+        if (this.typeChecker) {
+          try {
+            const tsType = this.typeChecker.getTypeAtLocation(typeofExpr.expression);
+            const irType = this.tsTypeToIRType(tsType, typeofExpr.expression);
+            expr.inferredType = irType;
+          } catch (e) {
+            // If type inference fails, continue without it
+          }
+        }
+        return new ir.UnaryExpression(
+          'typeof',
+          expr,
+          true, // prefix
+          this.parser.getSourceLocation(node)
+        );
+
       default:
         // 預設返回 identifier
         return new ir.Identifier('unknown', this.parser.getSourceLocation(node));
