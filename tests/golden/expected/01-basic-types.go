@@ -10,8 +10,7 @@ var nothing interface{} = nil
 var inferredString = "world"
 var inferredNumber = 3.14
 var inferredBoolean = false
-
-var anyValue interface{} = 42
+var anyValue = 42
 
 var unknownValue interface{} = 42
 

@@ -638,11 +638,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       if (!node.type) {
         shouldInferType = true;
       } else if (node.type instanceof ir.PrimitiveType && node.type.kind === 'any') {
-        // Use inference for 'any' + Literal, unless name suggests explicit any
-        const looksLikeExplicitAny = /any|unknown|value/i.test(name);
-        if (node.initializer instanceof ir.Literal && !looksLikeExplicitAny) {
-          shouldInferType = true;
-        }
+        // Use inference for 'any' type - prefer Go's type inference over interface{}
+        shouldInferType = true;
       }
     }
 
