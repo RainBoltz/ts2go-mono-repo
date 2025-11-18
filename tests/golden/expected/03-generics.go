@@ -38,6 +38,7 @@ func (b *Box[T]) GetValue() T {
 }
 
 func (b *Box[T]) SetValue(value T) {
+	b.Value = value
 }
 
 func MapBox[T any, U any](b *Box[T], fn func(T) U) *Box[U] {
