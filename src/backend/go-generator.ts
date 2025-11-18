@@ -1953,6 +1953,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   /**
+   * Get the element type of an array expression
+   */
+  private getArrayElementType(expr: ir.Expression): string {
+    if (expr.inferredType instanceof ir.ArrayType) {
+      return expr.inferredType.elementType.accept(this);
+    }
+    // Fallback to interface{} if type is unknown
+    return 'interface{}';
+  }
+
+  /**
    * Get Go type name for union members
    * For numbers in unions, always use float64 for compatibility
    */
@@ -2704,6 +2715,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         return `append(${arrayExpr}, ${args})`;
       }
 
+      // Handle array.slice(start, end) → array[start:end]
+      if (methodName === 'slice' || methodName === 'Slice') {
+        const arrayExpr = memberExpr.object.accept(this);
+        if (node.args.length === 0) {
+          // slice() with no args creates a copy
+          return `append([]${this.getArrayElementType(memberExpr.object)}{}, ${arrayExpr}...)`;
+        } else if (node.args.length === 1) {
+          const start = node.args[0].accept(this);
+          return `${arrayExpr}[${start}:]`;
+        } else if (node.args.length === 2) {
+          const start = node.args[0].accept(this);
+          const end = node.args[1].accept(this);
+          return `${arrayExpr}[${start}:${end}]`;
+        }
+      }
+
       // Handle Map.get(key) → map[key] (returns value directly in Go)
       if (methodName === 'get' || methodName === 'Get') {
         const mapExpr = memberExpr.object.accept(this);
@@ -2788,6 +2815,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       let property: string;
       if (node.property instanceof ir.Identifier) {
         const propName = node.property.name;
+
+        // Special handling for array length property → len(array)
+        if (propName === 'length') {
+          // Check if object is likely an array type
+          // Use type information if available, otherwise use heuristic
+          const isArray = node.object.inferredType instanceof ir.ArrayType ||
+                         (node.object.inferredType instanceof ir.TypeReference &&
+                          node.object.inferredType.name === 'Array') ||
+                         // Heuristic: parameter names or variables that are likely arrays
+                         (node.object instanceof ir.Identifier &&
+                          (node.object.name.endsWith('s') || node.object.name.includes('arr') ||
+                           node.object.name.includes('list') || node.object.name.includes('items')));
+
+          if (isArray) {
+            return `len(${object})`;
+          }
+        }
+
         // Keep private field names lowercase, capitalize public fields
         if (this.privateFieldNames.has(propName)) {
           property = propName; // Keep lowercase for private fields
@@ -2799,8 +2844,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // This handles the case where interface properties became getter methods
         // TODO: Use type information to be more precise
         const propertyToMethod: {[key: string]: string} = {
-          'Length': 'Len()',
-          'length': 'Len()',
+          // Note: length is handled above for arrays
         };
 
         // Only convert if this is not in the current class context (i.e., not accessing own fields)
