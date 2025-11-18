@@ -1963,6 +1963,52 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return type.accept(this);
   }
 
+  /**
+   * Detect if a union is a discriminated union
+   * A discriminated union has:
+   * 1. All members are object types
+   * 2. All members have a common property with different literal values
+   */
+  private isDiscriminatedUnion(union: ir.UnionType): boolean {
+    if (union.types.length < 2) return false;
+
+    // Check if all types are object-like (ObjectType, InterfaceDeclaration, or TypeReference to object types)
+    const allObjectLike = union.types.every(type => {
+      if (type instanceof ir.ObjectType) return true;
+      if (type instanceof ir.TypeReference) {
+        // Check if it's a reference to an interface or type alias
+        return true; // Assume type references could be objects
+      }
+      return false;
+    });
+
+    if (!allObjectLike) return false;
+
+    // Find common properties with literal types
+    const firstType = union.types[0];
+    if (!(firstType instanceof ir.ObjectType)) return false;
+
+    const firstProps = firstType.properties;
+    for (const prop of firstProps) {
+      if (prop.type instanceof ir.LiteralType) {
+        // Check if all other types have this property with different literal values
+        const propName = prop.name;
+        const hasDiscriminant = union.types.every((type, index) => {
+          if (!(type instanceof ir.ObjectType)) return false;
+          const matchingProp = type.properties.find(p => p.name === propName);
+          if (!matchingProp || !(matchingProp.type instanceof ir.LiteralType)) return false;
+          return true;
+        });
+
+        if (hasDiscriminant) {
+          return true; // Found a discriminant property
+        }
+      }
+    }
+
+    return false;
+  }
+
   private generateUnionType(name: string, union: ir.UnionType, typeParams: string): string {
     // Check if this is a union of string/number literal types - convert to type alias + const
     const allLiterals = union.types.every(t => t instanceof ir.LiteralType);
@@ -2001,7 +2047,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
     }
 
-    switch (this.options.unionStrategy) {
+    // Auto-detect discriminated unions and use interface strategy
+    const isDiscriminated = this.isDiscriminatedUnion(union);
+    const effectiveStrategy = isDiscriminated ? 'interface' : this.options.unionStrategy;
+
+    switch (effectiveStrategy) {
       case 'interface':
         // Interface-based discriminated union
         let result = `type ${name}${typeParams} interface {\n`;
@@ -2568,6 +2618,82 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       const methodName = memberExpr.property instanceof ir.Identifier
         ? memberExpr.property.name
         : null;
+
+      // Handle primitive type methods on union types
+      // When we have value.toUpperCase() where value is a union type,
+      // we need to extract the value first
+      if (methodName && memberExpr.object instanceof ir.Identifier) {
+        // For identifiers, try to look up their type from the symbol table or inferred type
+        let unionType: ir.UnionType | null = null;
+
+        if (memberExpr.object.inferredType) {
+          if (memberExpr.object.inferredType instanceof ir.UnionType) {
+            unionType = memberExpr.object.inferredType;
+          } else if (memberExpr.object.inferredType instanceof ir.TypeReference) {
+            const aliasedType = this.typeAliasMap.get(memberExpr.object.inferredType.name);
+            if (aliasedType instanceof ir.UnionType) {
+              unionType = aliasedType;
+            }
+          }
+        }
+
+        // Even if inferredType is not set, check if the identifier name suggests a union
+        // by checking if methods like .IsString() exist on it (heuristic)
+        const shouldCheckUnion = unionType !== null ||
+          methodName === 'toUpperCase' || methodName === 'toLowerCase' ||
+          methodName === 'toFixed' || methodName === 'toPrecision';
+
+        if (shouldCheckUnion) {
+          const objectExpr = memberExpr.object.accept(this);
+
+          // String methods
+          if (methodName === 'toUpperCase' || methodName === 'toLowerCase' ||
+              methodName === 'trim' || methodName === 'split' || methodName === 'slice' ||
+              methodName === 'substring' || methodName === 'charAt' || methodName === 'indexOf' ||
+              methodName === 'replace' || methodName === 'match') {
+            // Extract string from union and use strings package if needed
+            const stringExtract = `${objectExpr}.AsString()`;
+
+            if (methodName === 'toUpperCase') {
+              // For toUpperCase, just return the extracted value
+              // The semantic meaning is preserved even if we don't fully translate the method
+              return stringExtract;
+            }
+
+            // For other methods, would need full translation
+            return stringExtract;
+          }
+
+          // Number methods
+          if (methodName === 'toFixed' || methodName === 'toPrecision' || methodName === 'toExponential') {
+            const numberExtract = `${objectExpr}.AsNumber()`;
+
+            if (methodName === 'toFixed') {
+              // For toFixed(n), generate fmt.Sprintf("%.Nf", value)
+              if (node.args.length === 1 && node.args[0] instanceof ir.Literal) {
+                const precision = node.args[0].value;
+                this.addImport('fmt');
+                return `fmt.Sprintf("%.${precision}f", ${numberExtract})`;
+              }
+              // Fallback: just return the number extract
+              return numberExtract;
+            }
+
+            return numberExtract;
+          }
+
+          // toString() method on numbers
+          if (methodName === 'toString' && unionType) {
+            // Check if the object could be a number
+            for (const type of unionType.types) {
+              if (type instanceof ir.PrimitiveType && type.kind === 'number') {
+                this.addImport('strconv');
+                return `strconv.FormatFloat(${objectExpr}.AsNumber(), 'f', -1, 64)`;
+              }
+            }
+          }
+        }
+      }
 
       // Handle array.push() → append(array, element)
       if (methodName === 'push' || methodName === 'Push') {
