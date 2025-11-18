@@ -2937,7 +2937,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitNewExpression(node: ir.NewExpression): string {
-    const callee = node.callee.accept(this);
+    let callee: string;
+    let constructorName: string;
+
+    // Handle member expressions like Utils.Logger
+    if (node.callee instanceof ir.MemberExpression) {
+      const memberExpr = node.callee as ir.MemberExpression;
+      // For new Namespace.Class(), we want NewClass, not NewNamespace.Class
+      if (memberExpr.property instanceof ir.Identifier) {
+        constructorName = memberExpr.property.name;
+      } else {
+        constructorName = memberExpr.property.accept(this);
+      }
+      callee = constructorName;
+    } else {
+      callee = node.callee.accept(this);
+      constructorName = callee;
+    }
+
     const args = node.args.map(arg => arg.accept(this)).join(', ');
 
     // Special handling for Date
@@ -2967,7 +2984,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
 
     // TypeScript's new → Go's constructor function
-    return `New${callee}(${args})`;
+    return `New${constructorName}(${args})`;
   }
 
   visitSuperExpression(node: ir.SuperExpression): string {
