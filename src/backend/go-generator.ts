@@ -33,6 +33,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private currentClassTypeParams: ir.TypeParameter[] = []; // Track current class type parameters for method receivers
   private typeAliasMap = new Map<string, ir.IRType>(); // Track type alias definitions (e.g., Person -> IntersectionType)
   private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
+  private isModuleLevel = true; // Track if we're at module level (vs inside function/method)
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -866,6 +867,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       let result = '{\n';
       this.increaseIndent();
 
+      // Mark that we're inside a function (not at module level)
+      const wasModuleLevel = this.isModuleLevel;
+      this.isModuleLevel = false;
+
       // Add default parameter initializations
       for (const init of defaultInits) {
         result += `${this.indent()}${init}\n`;
@@ -878,6 +883,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           result += `${this.indent()}${stmtCode}\n`;
         }
       }
+
+      // Restore module level flag
+      this.isModuleLevel = wasModuleLevel;
 
       this.decreaseIndent();
       result += `${this.indent()}}`;
@@ -2289,12 +2297,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     let result = '{\n';
 
     this.increaseIndent();
+
+    // Mark that we're inside a block (not at module level)
+    const wasModuleLevel = this.isModuleLevel;
+    this.isModuleLevel = false;
+
     for (const stmt of node.statements) {
       const stmtCode = stmt.accept(this);
       if (stmtCode) {
         result += `${this.indent()}${stmtCode}\n`;
       }
     }
+
+    // Restore module level flag
+    this.isModuleLevel = wasModuleLevel;
+
     this.decreaseIndent();
 
     result += `${this.indent()}}`;
@@ -2303,9 +2320,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitExpressionStatement(node: ir.ExpressionStatement): string {
-    // Skip reassignments to any/unknown typed variables as they don't make sense in Go
+    // Handle assignment expressions
     if (node.expression instanceof ir.AssignmentExpression) {
-      return '';
+      // Skip module-level assignments (they don't make sense in Go)
+      if (this.isModuleLevel) {
+        return '';
+      }
+      // Emit assignments inside functions
+      return node.expression.accept(this);
     }
 
     // Handle array.push() calls that need to be converted to assignment statements
