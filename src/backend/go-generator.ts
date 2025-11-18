@@ -564,10 +564,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return `map[${keyType}]${valueType}`;
     }
 
+    // Special handling for Record<K, V> → map[K]V (same as Map)
+    if (typeName === 'Record' && node.typeArguments && node.typeArguments.length === 2) {
+      const keyType = node.typeArguments[0].accept(this);
+      const valueType = node.typeArguments[1].accept(this);
+      return `map[${keyType}]${valueType}`;
+    }
+
     // Special handling for Set<T> → map[T]bool (Go idiom for sets)
     if (typeName === 'Set' && node.typeArguments && node.typeArguments.length === 1) {
       const elementType = node.typeArguments[0].accept(this);
       return `map[${elementType}]bool`;
+    }
+
+    // Special handling for Partial<T> → T (Go doesn't have partial types)
+    // Note: In practice, optional fields should use pointers
+    if (typeName === 'Partial' && node.typeArguments && node.typeArguments.length === 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return elementType;
     }
 
     // Special handling for Promise<T> → T (since we handle async with error returns)
@@ -871,7 +885,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return `${signature} ${result}`;
     }
 
-    return signature;
+    // If there's no body, this is a function overload signature
+    // Go doesn't support overloads, so skip these declarations
+    return '';
   }
 
   visitParameter(node: ir.Parameter): string {
