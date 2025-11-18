@@ -521,6 +521,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   visitTypeReference(node: ir.TypeReference): string {
     let typeName = node.name;
 
+    // Special handling for Error → error (Go's built-in error interface)
+    if (typeName === 'Error') {
+      return 'error';
+    }
+
     // Special handling for built-in types
     if (typeName === 'Date') {
       this.addImport('time');
@@ -894,10 +899,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // Struct 定義 (only instance members)
     result += `type ${name}${typeParams} struct {\n`;
 
+    // Check if this class extends Error (special handling)
+    const extendsError = node.extendsClause &&
+                         node.extendsClause instanceof ir.TypeReference &&
+                         node.extendsClause.name === 'Error';
+
     // Embedding (extends only - implements is for type checking, not data)
-    if (node.extendsClause) {
+    if (node.extendsClause && !extendsError) {
       this.increaseIndent();
       result += `${this.indent()}${node.extendsClause.accept(this)}\n`;
+      this.decreaseIndent();
+    }
+
+    // For Error class extension, add Message field
+    if (extendsError) {
+      this.increaseIndent();
+      result += `${this.indent()}Message string\n`;
       this.decreaseIndent();
     }
     // Note: implements clauses are NOT embedded in Go - they're just type constraints
@@ -970,7 +987,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
 
     // Constructor and instance methods
-    const constructor = this.generateConstructor(name, node);
+    const constructor = this.generateConstructor(name, node, extendsError);
 
     if (constructor) {
       result += '\n\n' + constructor;
@@ -992,6 +1009,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       result += '\n\n' + this.generateMethod(name, instanceMethods[i]);
     }
 
+    // Generate Error() method for classes extending Error
+    if (extendsError) {
+      result += '\n\n';
+      result += `func (e ${name}) Error() string {\n`;
+      result += `\treturn e.Message\n`;
+      result += `}`;
+    }
+
     // Generic methods (methods with their own type parameters) as standalone functions
     for (let i = 0; i < genericMethods.length; i++) {
       result += '\n\n' + this.generateGenericMethod(name, genericMethods[i]);
@@ -1000,7 +1025,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return result;
   }
 
-  private generateConstructor(className: string, node: ir.ClassDeclaration): string {
+  private generateConstructor(className: string, node: ir.ClassDeclaration, extendsError: boolean = false): string {
     // Filter out static properties - only instance properties should be in the constructor
     const allProperties = node.members.filter(m => m instanceof ir.PropertyMember) as ir.PropertyMember[];
     const properties = allProperties.filter(p => !this.hasModifier(p.modifiers, 'static'));
@@ -1124,41 +1149,60 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // If there's a parent class, include its name in the max calculation
     if (superCall && node.extendsClause) {
-      const parentClassName = node.extendsClause.accept(this);
-      maxFieldNameLen = Math.max(maxFieldNameLen, parentClassName.length);
+      if (extendsError) {
+        // For Error extension, "Message" is the field name
+        maxFieldNameLen = Math.max(maxFieldNameLen, 'Message'.length);
+      } else {
+        const parentClassName = node.extendsClause.accept(this);
+        maxFieldNameLen = Math.max(maxFieldNameLen, parentClassName.length);
+      }
     }
 
     const initPaddingWidth = Math.max(maxFieldNameLen + 1 + 1, 11); // +1 for colon, +1 for space
 
     // If there's a super() call and parent class, initialize the embedded parent struct first
     if (superCall && node.extendsClause) {
-      // Get the parent class name
-      const parentClassName = node.extendsClause.accept(this);
+      if (extendsError) {
+        // Special handling for Error class - just initialize Message field
+        // super(message) becomes Message: message
+        const messageArg = superCall.args.length > 0 ? superCall.args[0].accept(this) : '""';
+        const nameWithColon = `Message:`;
+        const paddedName = nameWithColon.padEnd(initPaddingWidth);
 
-      // Build the parent constructor call with arguments from super()
-      const parentArgs: string[] = [];
-      for (const arg of superCall.args) {
-        if (arg instanceof ir.Identifier) {
-          // Special case: if arg is 'email', use 'emailPtr' instead
-          if (arg.name === 'email') {
-            parentArgs.push('emailPtr');
+        this.increaseIndent();
+        this.increaseIndent();
+        result += `${this.indent()}${paddedName}${messageArg},\n`;
+        this.decreaseIndent();
+        this.decreaseIndent();
+      } else {
+        // Get the parent class name
+        const parentClassName = node.extendsClause.accept(this);
+
+        // Build the parent constructor call with arguments from super()
+        const parentArgs: string[] = [];
+        for (const arg of superCall.args) {
+          if (arg instanceof ir.Identifier) {
+            // Special case: if arg is 'email', use 'emailPtr' instead
+            if (arg.name === 'email') {
+              parentArgs.push('emailPtr');
+            } else {
+              parentArgs.push(arg.name);
+            }
           } else {
-            parentArgs.push(arg.name);
+            parentArgs.push(arg.accept(this));
           }
-        } else {
-          parentArgs.push(arg.accept(this));
         }
+
+        const parentInit = `*New${parentClassName}(${parentArgs.join(', ')})`;
+        const nameWithColon = `${parentClassName}:`;
+        const paddedName = nameWithColon.padEnd(initPaddingWidth);
+
+        this.increaseIndent();
+        this.increaseIndent();
+        result += `${this.indent()}${paddedName}${parentInit},\n`;
+        this.decreaseIndent();
+        this.decreaseIndent();
       }
-
-      const parentInit = `*New${parentClassName}(${parentArgs.join(', ')})`;
-      const nameWithColon = `${parentClassName}:`;
-      const paddedName = nameWithColon.padEnd(initPaddingWidth);
-
-      this.increaseIndent();
-      this.increaseIndent();
-      result += `${this.indent()}${paddedName}${parentInit},\n`;
-      this.decreaseIndent();
-      this.decreaseIndent();
     }
 
     for (const prop of properties) {
