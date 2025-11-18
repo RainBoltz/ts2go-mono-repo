@@ -2001,6 +2001,97 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
     }
 
+    // Check if this is a discriminated union (all members are object types with a common discriminant field)
+    const allObjectTypes = union.types.every(t => t instanceof ir.ObjectType);
+    if (allObjectTypes && union.types.length > 1) {
+      const objectTypes = union.types as ir.ObjectType[];
+
+      // Find common properties across all variants
+      const firstProps = new Map<string, ir.IRType>();
+      objectTypes[0].properties.forEach(prop => {
+        firstProps.set(prop.name, prop.type);
+      });
+
+      // Check each property to see if it appears in all variants
+      let discriminantField: string | null = null;
+      const discriminantValues: any[] = [];
+
+      for (const [propName, propType] of firstProps.entries()) {
+        // Check if this property exists in all variants
+        const inAllVariants = objectTypes.every(objType =>
+          objType.properties.some(p => p.name === propName)
+        );
+
+        if (inAllVariants && propType instanceof ir.LiteralType) {
+          // Check if all variants have different literal values for this property
+          const values = objectTypes.map(objType => {
+            const prop = objType.properties.find(p => p.name === propName);
+            return prop && prop.type instanceof ir.LiteralType ? (prop.type as ir.LiteralType).value : null;
+          });
+
+          const allLiterals = values.every(v => v !== null);
+          const allUnique = new Set(values).size === values.length;
+
+          if (allLiterals && allUnique) {
+            discriminantField = propName;
+            discriminantValues.push(...values);
+            break;
+          }
+        }
+      }
+
+      // If we found a discriminant field, generate a merged struct
+      if (discriminantField) {
+        const allProperties = new Map<string, ir.IRType>();
+
+        // Collect all unique properties from all variants
+        for (const objType of objectTypes) {
+          for (const prop of objType.properties) {
+            if (!allProperties.has(prop.name)) {
+              allProperties.set(prop.name, prop.type);
+            } else {
+              // If the property exists in multiple variants with different types,
+              // we might need to use a union type or interface{}
+              const existingType = allProperties.get(prop.name)!;
+              if (existingType !== prop.type) {
+                // For now, keep the first type encountered
+                // A more sophisticated approach would create a union of the types
+              }
+            }
+          }
+        }
+
+        // Generate the merged struct
+        let result = `type ${name}${typeParams} struct {\n`;
+
+        for (const [propName, propType] of allProperties.entries()) {
+          const goFieldName = this.capitalize(propName);
+          let goType: string;
+
+          if (propName === discriminantField) {
+            // The discriminant field becomes its base type (bool for true/false, string for string literals, etc.)
+            const firstLiteral = propType as ir.LiteralType;
+            if (typeof firstLiteral.value === 'boolean') {
+              goType = 'bool';
+            } else if (typeof firstLiteral.value === 'string') {
+              goType = 'string';
+            } else if (typeof firstLiteral.value === 'number') {
+              goType = 'int';
+            } else {
+              goType = 'interface{}';
+            }
+          } else {
+            goType = propType.accept(this);
+          }
+
+          result += `\t${goFieldName} ${goType}\n`;
+        }
+
+        result += '}';
+        return result;
+      }
+    }
+
     switch (this.options.unionStrategy) {
       case 'interface':
         // Interface-based discriminated union

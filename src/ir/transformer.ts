@@ -1124,7 +1124,20 @@ export class IRTransformer {
       }
     }
 
-    return new ir.ObjectExpression(properties, this.parser.getSourceLocation(node));
+    const objExpr = new ir.ObjectExpression(properties, this.parser.getSourceLocation(node));
+
+    // Try to infer the type of the object expression
+    if (this.typeChecker) {
+      try {
+        const tsType = this.typeChecker.getTypeAtLocation(node);
+        const irType = this.tsTypeToIRType(tsType, node);
+        objExpr.inferredType = irType;
+      } catch (e) {
+        // If type inference fails, continue without it
+      }
+    }
+
+    return objExpr;
   }
 
   private transformCallExpression(node: ts.CallExpression): ir.CallExpression | ir.SuperExpression {
