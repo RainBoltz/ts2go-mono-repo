@@ -155,7 +155,7 @@ export interface CompilerOptions {
 export const defaultOptions: Partial<CompilerOptions> = {
   sourceMap: true,
   preserveComments: false,
-  numberStrategy: 'float64',
+  numberStrategy: 'int',
   unionStrategy: 'tagged',
   nullabilityStrategy: 'pointer',
   asyncStrategy: 'sync',

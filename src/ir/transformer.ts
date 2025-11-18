@@ -20,6 +20,32 @@ export class IRTransformer {
   }
 
   /**
+   * Convert a TypeScript Type (from type checker) to IR Type
+   */
+  private tsTypeToIRType(type: ts.Type, enclosingNode?: ts.Node): ir.IRType | undefined {
+    if (!this.typeChecker) {
+      return undefined;
+    }
+
+    try {
+      // Convert the ts.Type to a ts.TypeNode
+      const typeNode = this.typeChecker.typeToTypeNode(
+        type,
+        enclosingNode,
+        ts.NodeBuilderFlags.NoTruncation
+      );
+
+      if (typeNode) {
+        return this.transformTypeNode(typeNode);
+      }
+    } catch (e) {
+      // If conversion fails, return undefined
+    }
+
+    return undefined;
+  }
+
+  /**
    * 轉換 TypeScript AST 為 IR Module
    */
   async transform(sourceFile: ts.SourceFile): Promise<ir.Module> {
@@ -712,6 +738,26 @@ export class IRTransformer {
       case ts.SyntaxKind.TemplateExpression:
         return this.transformTemplateExpression(node as ts.TemplateExpression);
 
+      case ts.SyntaxKind.TypeOfExpression:
+        const typeofExpr = node as ts.TypeOfExpression;
+        const expr = this.transformExpression(typeofExpr.expression);
+        // Try to infer the type of the expression for union type guard optimization
+        if (this.typeChecker) {
+          try {
+            const tsType = this.typeChecker.getTypeAtLocation(typeofExpr.expression);
+            const irType = this.tsTypeToIRType(tsType, typeofExpr.expression);
+            expr.inferredType = irType;
+          } catch (e) {
+            // If type inference fails, continue without it
+          }
+        }
+        return new ir.UnaryExpression(
+          'typeof',
+          expr,
+          true, // prefix
+          this.parser.getSourceLocation(node)
+        );
+
       default:
         // 預設返回 identifier
         return new ir.Identifier('unknown', this.parser.getSourceLocation(node));
@@ -722,9 +768,23 @@ export class IRTransformer {
 
   private transformParameter(param: ts.ParameterDeclaration): ir.Parameter {
     const name = ts.isIdentifier(param.name) ? param.name.text : 'unknown';
+
+    // Try to get type from annotation or infer it
+    let paramType: ir.IRType | undefined = param.type ? this.transformTypeNode(param.type) : undefined;
+
+    // If no explicit type, try to infer from TypeScript type checker
+    if (!paramType && this.typeChecker) {
+      try {
+        const tsType = this.typeChecker.getTypeAtLocation(param);
+        paramType = this.tsTypeToIRType(tsType, param);
+      } catch (e) {
+        // If type inference fails, leave as undefined
+      }
+    }
+
     return new ir.Parameter(
       name,
-      param.type ? this.transformTypeNode(param.type) : undefined,
+      paramType,
       !!param.questionToken,
       param.initializer ? this.transformExpression(param.initializer) : undefined,
       !!param.dotDotDotToken,
@@ -1162,10 +1222,28 @@ export class IRTransformer {
       ? this.transformBlock(node.body)
       : this.transformExpression(node.body);
 
+    // Try to get return type from explicit annotation first
+    let returnType: ir.IRType | undefined = node.type ? this.transformTypeNode(node.type) : undefined;
+
+    // If no explicit return type, try to infer from TypeScript type checker
+    if (!returnType && this.typeChecker) {
+      try {
+        const type = this.typeChecker.getTypeAtLocation(node);
+        const signatures = this.typeChecker.getSignaturesOfType(type, ts.SignatureKind.Call);
+        if (signatures.length > 0) {
+          const signature = signatures[0];
+          const tsReturnType = this.typeChecker.getReturnTypeOfSignature(signature);
+          returnType = this.tsTypeToIRType(tsReturnType, node);
+        }
+      } catch (e) {
+        // If type inference fails, we'll leave returnType as undefined
+      }
+    }
+
     return new ir.ArrowFunctionExpression(
       node.parameters.map(p => this.transformParameter(p)),
       body,
-      node.type ? this.transformTypeNode(node.type) : undefined,
+      returnType,
       node.typeParameters?.map(tp => this.transformTypeParameter(tp)),
       !!node.modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword),
       this.parser.getSourceLocation(node)
@@ -1173,10 +1251,28 @@ export class IRTransformer {
   }
 
   private transformFunctionExpression(node: ts.FunctionExpression): ir.FunctionExpression {
+    // Try to get return type from explicit annotation first
+    let returnType: ir.IRType | undefined = node.type ? this.transformTypeNode(node.type) : undefined;
+
+    // If no explicit return type, try to infer from TypeScript type checker
+    if (!returnType && this.typeChecker) {
+      try {
+        const type = this.typeChecker.getTypeAtLocation(node);
+        const signatures = this.typeChecker.getSignaturesOfType(type, ts.SignatureKind.Call);
+        if (signatures.length > 0) {
+          const signature = signatures[0];
+          const tsReturnType = this.typeChecker.getReturnTypeOfSignature(signature);
+          returnType = this.tsTypeToIRType(tsReturnType, node);
+        }
+      } catch (e) {
+        // If type inference fails, we'll leave returnType as undefined
+      }
+    }
+
     return new ir.FunctionExpression(
       node.parameters.map(p => this.transformParameter(p)),
       node.body ? this.transformBlock(node.body) : new ir.BlockStatement([]),
-      node.type ? this.transformTypeNode(node.type) : undefined,
+      returnType,
       node.typeParameters?.map(tp => this.transformTypeParameter(tp)),
       !!node.modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword),
       node.name?.text,
