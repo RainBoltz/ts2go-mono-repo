@@ -2834,16 +2834,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Special handling for array length property → len(array)
         if (propName === 'length') {
           // Check if object is likely an array type
-          // Use type information if available, otherwise use heuristic
-          const isArray = node.object.inferredType instanceof ir.ArrayType ||
-                         (node.object.inferredType instanceof ir.TypeReference &&
-                          node.object.inferredType.name === 'Array') ||
-                         // Heuristic: parameter names or variables that are likely arrays
-                         (node.object instanceof ir.Identifier &&
-                          (node.object.name.endsWith('s') || node.object.name.includes('arr') ||
-                           node.object.name.includes('list') || node.object.name.includes('items')));
+          // Only convert if we have type information or a strong heuristic
+          const isKnownArray = node.object.inferredType instanceof ir.ArrayType ||
+                              (node.object.inferredType instanceof ir.TypeReference &&
+                               node.object.inferredType.name === 'Array');
 
-          if (isArray) {
+          // Use strong heuristics only if type info is not available
+          const isLikelyArray = !node.object.inferredType &&
+                               node.object instanceof ir.Identifier &&
+                               (node.object.name.includes('arr') ||
+                                node.object.name.includes('list') ||
+                                node.object.name.includes('items') ||
+                                node.object.name === 'numbers' ||
+                                node.object.name === 'chunks');
+
+          if (isKnownArray || isLikelyArray) {
             return `len(${object})`;
           }
         }
@@ -2859,11 +2864,23 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // This handles the case where interface properties became getter methods
         // TODO: Use type information to be more precise
         const propertyToMethod: {[key: string]: string} = {
-          // Note: length is handled above for arrays
+          // For interface Length property (not array length which is handled above)
+          'Length': 'Len()',
         };
 
         // Only convert if this is not in the current class context (i.e., not accessing own fields)
+        // and not already handled as array length
         if (propertyToMethod[property] && !this.fieldTypeMap.has(propName)) {
+          // Make sure we didn't already handle this as array length
+          if (propName === 'length') {
+            const isKnownArray = node.object.inferredType instanceof ir.ArrayType ||
+                                (node.object.inferredType instanceof ir.TypeReference &&
+                                 node.object.inferredType.name === 'Array');
+            if (isKnownArray) {
+              // Already handled above, don't apply this transformation
+              return `${object}.${property}`;
+            }
+          }
           return `${object}.${propertyToMethod[property]}`;
         }
       } else {
