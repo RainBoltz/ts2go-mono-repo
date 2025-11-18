@@ -758,6 +758,13 @@ export class IRTransformer {
           this.parser.getSourceLocation(node)
         );
 
+      case ts.SyntaxKind.AsExpression:
+      case ts.SyntaxKind.TypeAssertionExpression:
+        // Type assertions (e.g., "x as const" or "<const>x") should be unwrapped
+        // We just transform the underlying expression and preserve its type info
+        const assertionExpr = node as ts.AsExpression | ts.TypeAssertion;
+        return this.transformExpression(assertionExpr.expression);
+
       default:
         // 預設返回 identifier
         return new ir.Identifier('unknown', this.parser.getSourceLocation(node));
