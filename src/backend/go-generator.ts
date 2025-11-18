@@ -681,6 +681,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           init = `[]${elementType}{${elements}}`;
           // Use type inference for array
           return `${tupleTypeDef}var ${name} = ${init}`;
+        } else if ((node.type instanceof ir.TypeReference ||
+                    node.type instanceof ir.IntersectionType ||
+                    node.type instanceof ir.ObjectType) &&
+                   node.initializer instanceof ir.ObjectExpression) {
+          // Generate struct literal for object initializers
+          const props = node.initializer.properties.map(p => {
+            const key = p.key instanceof ir.Identifier ?
+              this.capitalize(p.key.name) :
+              p.key.accept(this);
+            const value = p.value.accept(this);
+            return `${key}: ${value}`;
+          }).join(', ');
+          init = `${typeName}{${props}}`;
+          // Use type inference for struct
+          return `${tupleTypeDef}var ${name} = ${init}`;
         } else {
           init = node.initializer.accept(this);
         }
@@ -2211,15 +2226,38 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitObjectExpression(node: ir.ObjectExpression): string {
-    const props = node.properties.map(p => this.visitProperty(p)).join(', ');
+    // Check if this object has a struct/interface type
+    const isStructType = node.inferredType && (
+      node.inferredType instanceof ir.ObjectType ||
+      node.inferredType instanceof ir.TypeReference ||
+      node.inferredType instanceof ir.IntersectionType
+    );
 
-    // 物件字面量轉為 map
-    return `map[string]interface{}{${props}}`;
+    if (isStructType) {
+      // Generate struct literal: TypeName{Field: value, ...}
+      const typeName = node.inferredType!.accept(this);
+      const props = node.properties.map(p => this.visitStructProperty(p)).join(', ');
+      return `${typeName}{${props}}`;
+    } else {
+      // Generate map literal: map[string]interface{}{key: value, ...}
+      const props = node.properties.map(p => this.visitProperty(p)).join(', ');
+      return `map[string]interface{}{${props}}`;
+    }
   }
 
   visitProperty(node: ir.Property): string {
     const key = node.key instanceof ir.Identifier ?
       `"${node.key.name}"` :
+      node.key.accept(this);
+    const value = node.value.accept(this);
+
+    return `${key}: ${value}`;
+  }
+
+  visitStructProperty(node: ir.Property): string {
+    // For struct literals, use capitalized field names without quotes
+    const key = node.key instanceof ir.Identifier ?
+      this.capitalize(node.key.name) :
       node.key.accept(this);
     const value = node.value.accept(this);
 
