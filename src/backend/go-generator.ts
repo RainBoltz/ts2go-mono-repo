@@ -275,6 +275,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
 
     const declarations: DeclInfo[] = [];
+    const initStatements: string[] = []; // Collect top-level expression statements for init()
 
     for (let i = 0; i < node.statements.length; i++) {
       const stmt = node.statements[i];
@@ -311,6 +312,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       } else if (stmt instanceof ir.ClassDeclaration || stmt instanceof ir.InterfaceDeclaration ||
                  stmt instanceof ir.TypeAliasDeclaration || stmt instanceof ir.EnumDeclaration) {
         declType = 'type';
+      } else if (stmt instanceof ir.ExpressionStatement) {
+        // Top-level expression statements need to go in init()
+        initStatements.push(code);
+        continue; // Don't add to regular declarations
       } else {
         declType = 'other';
       }
@@ -409,6 +414,16 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           result += '\n';
         }
       }
+    }
+
+    // Add init() function if there are any top-level expression statements
+    if (initStatements.length > 0) {
+      result += '\n';
+      result += 'func init() {\n';
+      for (const stmt of initStatements) {
+        result += `\t${stmt}\n`;
+      }
+      result += '}\n';
     }
 
     // Add final newline
