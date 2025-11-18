@@ -1952,6 +1952,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return 'value';
   }
 
+  /**
+   * Get Go type name for union members
+   * For numbers in unions, always use float64 for compatibility
+   */
+  private getUnionMemberType(type: ir.IRType): string {
+    if (type instanceof ir.PrimitiveType && type.kind === 'number') {
+      return 'float64';
+    }
+    return type.accept(this);
+  }
+
   private generateUnionType(name: string, union: ir.UnionType, typeParams: string): string {
     // Check if this is a union of string/number literal types - convert to type alias + const
     const allLiterals = union.types.every(t => t instanceof ir.LiteralType);
@@ -1999,7 +2010,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
         // Generate concrete types
         for (let i = 0; i < union.types.length; i++) {
-          const typeName = union.types[i].accept(this);
+          const typeName = this.getUnionMemberType(union.types[i]);
           const variantName = `${name}Variant${i}`;
           result += `type ${variantName} struct { Value ${typeName} }\n`;
           result += `func (${variantName}) is${name}() {}\n\n`;
@@ -2019,7 +2030,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Generate fields with semantic names
         for (let i = 0; i < union.types.length; i++) {
           const type = union.types[i];
-          const typeName = type.accept(this);
+          const typeName = this.getUnionMemberType(type);
           const fieldName = this.getSemanticFieldName(type);
           taggedResult += `\t${fieldName}    *${typeName}\n`;
         }
@@ -2029,7 +2040,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Generate constructor functions
         for (let i = 0; i < union.types.length; i++) {
           const type = union.types[i];
-          const typeName = type.accept(this);
+          const typeName = this.getUnionMemberType(type);
           const semanticName = this.getSemanticTypeName(type);
           const fieldName = this.getSemanticFieldName(type);
           taggedResult += `func New${name}From${semanticName}(v ${typeName}) ${name} {\n`;
@@ -2049,7 +2060,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Generate accessor methods
         for (let i = 0; i < union.types.length; i++) {
           const type = union.types[i];
-          const typeName = type.accept(this);
+          const typeName = this.getUnionMemberType(type);
           const semanticName = this.getSemanticTypeName(type);
           const fieldName = this.getSemanticFieldName(type);
           taggedResult += `func (u ${name}) As${semanticName}() ${typeName} {\n`;
