@@ -33,6 +33,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private currentClassTypeParams: ir.TypeParameter[] = []; // Track current class type parameters for method receivers
   private typeAliasMap = new Map<string, ir.IRType>(); // Track type alias definitions (e.g., Person -> IntersectionType)
   private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
+  private currentFunctionReturnType: ir.IRType | null = null; // Track current function's return type for contextual typing
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -64,6 +65,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.exportedNames.clear();
     this.typeAliasMap.clear();
     this.interfaceProperties.clear();
+    this.currentFunctionReturnType = null;
   }
 
   /**
@@ -842,6 +844,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         result += `${this.indent()}${init}\n`;
       }
 
+      // Track return type for contextual typing of object literals
+      const previousReturnType = this.currentFunctionReturnType;
+      this.currentFunctionReturnType = node.returnType || null;
+
       // Add original body statements
       for (const stmt of node.body.statements) {
         const stmtCode = stmt.accept(this);
@@ -849,6 +855,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           result += `${this.indent()}${stmtCode}\n`;
         }
       }
+
+      // Restore previous return type context
+      this.currentFunctionReturnType = previousReturnType;
 
       this.decreaseIndent();
       result += `${this.indent()}}`;
@@ -1145,7 +1154,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       // No super() call - just use constructor parameter properties
       for (const p of constructorParams) {
         const isPrivate = this.hasModifier(p.modifiers, 'private');
-        const paramName = isPrivate ? p.name : p.name.toLowerCase();
+        // Preserve the original parameter name (camelCase) for Go function parameters
+        const paramName = p.name;
         let typeName = p.type?.accept(this) || 'interface{}';
 
         const isOptional = p.metadata.get('isOptional');
@@ -1265,7 +1275,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     for (const prop of properties) {
       const isPrivate = this.hasModifier(prop.modifiers, 'private');
       const fieldName = isPrivate ? prop.name : this.capitalize(prop.name);
-      const paramName = isPrivate ? prop.name : prop.name.toLowerCase();
+      // Preserve the original parameter name (camelCase) to match function parameter
+      const paramName = prop.name;
       const isConstructorParam = prop.metadata.get('isConstructorParam');
 
       if (isConstructorParam) {
@@ -2584,16 +2595,28 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitObjectExpression(node: ir.ObjectExpression): string {
-    // Check if this object has a struct/interface type
-    const isStructType = node.inferredType && (
-      node.inferredType instanceof ir.ObjectType ||
-      node.inferredType instanceof ir.TypeReference ||
-      node.inferredType instanceof ir.IntersectionType
+    // First check if we have explicit inferred type
+    let typeToUse: ir.IRType | null = node.inferredType || null;
+
+    // If no inferred type or it's an ObjectType (anonymous struct), check contextual return type
+    if (!typeToUse || typeToUse instanceof ir.ObjectType) {
+      if (this.currentFunctionReturnType) {
+        // Use the function's return type if it's a named type
+        if (this.currentFunctionReturnType instanceof ir.TypeReference) {
+          typeToUse = this.currentFunctionReturnType;
+        }
+      }
+    }
+
+    // Check if this object should be a struct type
+    const isStructType = typeToUse && (
+      typeToUse instanceof ir.TypeReference ||
+      typeToUse instanceof ir.IntersectionType
     );
 
     if (isStructType) {
       // Generate struct literal: TypeName{Field: value, ...}
-      const typeName = node.inferredType!.accept(this);
+      const typeName = typeToUse!.accept(this);
       const props = node.properties.map(p => this.visitStructProperty(p)).join(', ');
       return `${typeName}{${props}}`;
     } else {
