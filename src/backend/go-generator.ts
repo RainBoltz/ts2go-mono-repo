@@ -34,6 +34,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private typeAliasMap = new Map<string, ir.IRType>(); // Track type alias definitions (e.g., Person -> IntersectionType)
   private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
   private isModuleLevel = true; // Track if we're at module level (vs inside function/method)
+  private currentFunctionIsAsync = false; // Track if current function is async (for return statement handling)
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -578,11 +579,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return `map[${elementType}]bool`;
     }
 
-    // Special handling for Partial<T> → T (Go doesn't have partial types)
-    // Note: In practice, optional fields should use pointers
+    // Special handling for Partial<T> → *T (Go doesn't have partial types)
+    // Use pointer to allow nil check for optional parameters
     if (typeName === 'Partial' && node.typeArguments && node.typeArguments.length === 1) {
       const elementType = node.typeArguments[0].accept(this);
-      return elementType;
+      return `*${elementType}`;
     }
 
     // Special handling for Promise<T> → T (since we handle async with error returns)
@@ -871,6 +872,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       const wasModuleLevel = this.isModuleLevel;
       this.isModuleLevel = false;
 
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       // Add default parameter initializations
       for (const init of defaultInits) {
         result += `${this.indent()}${init}\n`;
@@ -884,8 +889,9 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         }
       }
 
-      // Restore module level flag
+      // Restore flags
       this.isModuleLevel = wasModuleLevel;
+      this.currentFunctionIsAsync = wasAsync;
 
       this.decreaseIndent();
       result += `${this.indent()}}`;
@@ -1452,8 +1458,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 方法體
     if (node.body) {
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       const body = this.visitBlockStatement(node.body);
-      // Reset receiver name after generating method body
+
+      // Reset flags
+      this.currentFunctionIsAsync = wasAsync;
       this.currentReceiverName = '';
       return `${signature} ${body}`;
     }
@@ -1510,8 +1522,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 方法體 - need to transform static member references
     if (node.body) {
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       // Generate the body with static member transformations
       const body = this.visitBlockStatementStatic(className, node.body);
+
+      // Reset async flag
+      this.currentFunctionIsAsync = wasAsync;
       return `${signature} ${body}`;
     }
 
@@ -1592,7 +1611,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // Function body - set receiver name for 'this' replacement
     if (node.body) {
       this.currentReceiverName = receiverName;
+
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       const body = this.visitBlockStatement(node.body);
+
+      // Reset flags
+      this.currentFunctionIsAsync = wasAsync;
       this.currentReceiverName = '';
       return `${signature} ${body}`;
     }
@@ -2372,12 +2399,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
             this.increaseIndent();
             result += `${this.indent()}if p == ${valueExpr} {\n`;
             this.increaseIndent();
-            result += `${this.indent()}return true\n`;
+            // For async functions, return (value, nil)
+            const returnStmt = this.currentFunctionIsAsync ? 'return true, nil' : 'return true';
+            result += `${this.indent()}${returnStmt}\n`;
             this.decreaseIndent();
             result += `${this.indent()}}\n`;
             this.decreaseIndent();
             result += `${this.indent()}}\n`;
-            result += `${this.indent()}return false`;
+            const falseReturn = this.currentFunctionIsAsync ? 'return false, nil' : 'return false';
+            result += `${this.indent()}${falseReturn}`;
             return result;
           }
         }
@@ -2391,11 +2421,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         if (unary.prefix && (unary.operator === '++' || unary.operator === '--')) {
           const argCode = unary.argument.accept(this);
           // Generate: arg++\nreturn arg
-          return `${argCode}${unary.operator}\n${this.indent()}return ${argCode}`;
+          const returnValue = this.currentFunctionIsAsync ? `${argCode}, nil` : argCode;
+          return `${argCode}${unary.operator}\n${this.indent()}return ${returnValue}`;
         }
       }
 
-      return `return ${node.argument.accept(this)}`;
+      const returnValue = node.argument.accept(this);
+      // For async functions, return (value, nil)
+      if (this.currentFunctionIsAsync) {
+        return `return ${returnValue}, nil`;
+      }
+      return `return ${returnValue}`;
+    }
+    // For async void functions, return nil
+    if (this.currentFunctionIsAsync) {
+      return 'return nil';
     }
     return 'return';
   }
@@ -2868,6 +2908,16 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       let property: string;
       if (node.property instanceof ir.Identifier) {
         const propName = node.property.name;
+
+        // Special handling for process.env.X → os.Getenv("X")
+        if (node.object instanceof ir.MemberExpression &&
+            node.object.object instanceof ir.Identifier &&
+            node.object.object.name === 'process' &&
+            node.object.property instanceof ir.Identifier &&
+            node.object.property.name === 'env') {
+          this.addImport('os');
+          return `os.Getenv("${propName}")`;
+        }
 
         // Special handling for array length property → len(array)
         if (propName === 'length') {
