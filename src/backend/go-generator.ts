@@ -2131,16 +2131,66 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     switch (effectiveStrategy) {
       case 'interface':
         // Interface-based discriminated union
+        // Find discriminant field
+        let discriminantField = '';
+        if (union.types[0] instanceof ir.ObjectType) {
+          const firstType = union.types[0] as ir.ObjectType;
+          for (const prop of firstType.properties) {
+            if (prop.type instanceof ir.LiteralType) {
+              const propName = prop.name;
+              const allHaveProp = union.types.every(type => {
+                if (!(type instanceof ir.ObjectType)) return false;
+                return type.properties.some(p => p.name === propName && p.type instanceof ir.LiteralType);
+              });
+              if (allHaveProp) {
+                discriminantField = propName;
+                break;
+              }
+            }
+          }
+        }
+
         let result = `type ${name}${typeParams} interface {\n`;
         result += `\tis${name}()\n`;
+        if (discriminantField) {
+          const capitalizedField = this.capitalize(discriminantField);
+          result += `\tGet${capitalizedField}() string\n`;
+        }
         result += '}\n\n';
 
-        // Generate concrete types
+        // Generate concrete struct types for each variant
         for (let i = 0; i < union.types.length; i++) {
-          const typeName = this.getUnionMemberType(union.types[i]);
-          const variantName = `${name}Variant${i}`;
-          result += `type ${variantName} struct { Value ${typeName} }\n`;
-          result += `func (${variantName}) is${name}() {}\n\n`;
+          const type = union.types[i];
+          const semanticName = this.getSemanticTypeName(type);
+          const variantName = `${semanticName}${name}`;
+
+          if (type instanceof ir.ObjectType) {
+            // Generate struct with actual fields
+            result += `type ${variantName} struct {\n`;
+            for (const prop of type.properties) {
+              const fieldName = this.capitalize(prop.name);
+              const fieldType = prop.type.accept(this);
+              result += `\t${fieldName} ${fieldType}\n`;
+            }
+            result += '}\n\n';
+
+            // Generate marker method
+            result += `func (${variantName[0].toLowerCase()} ${variantName}) is${name}() {}\n`;
+
+            // Generate discriminant accessor if present
+            if (discriminantField) {
+              const capitalizedField = this.capitalize(discriminantField);
+              const fieldName = this.capitalize(discriminantField);
+              result += `func (${variantName[0].toLowerCase()} ${variantName}) Get${capitalizedField}() string { return ${variantName[0].toLowerCase()}.${fieldName} }\n\n`;
+            } else {
+              result += '\n';
+            }
+          } else {
+            // Fallback for non-object types (shouldn't happen for discriminated unions)
+            const typeName = this.getUnionMemberType(type);
+            result += `type ${variantName} struct { Value ${typeName} }\n`;
+            result += `func (${variantName}) is${name}() {}\n\n`;
+          }
         }
 
         return result.trim();
