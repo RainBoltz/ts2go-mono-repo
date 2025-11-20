@@ -35,6 +35,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
   private isModuleLevel = true; // Track if we're at module level (vs inside function/method)
   private currentFunctionIsAsync = false; // Track if current function is async (for return statement handling)
+  private moduleInitStatements: string[] = []; // Collect module-level initializations that need init() function
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -66,6 +67,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.exportedNames.clear();
     this.typeAliasMap.clear();
     this.interfaceProperties.clear();
+    this.moduleInitStatements = [];
   }
 
   /**
@@ -418,11 +420,12 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
     }
 
-    // Add init() function if there are any top-level expression statements
-    if (initStatements.length > 0) {
+    // Add init() function if there are any top-level expression statements or module init statements
+    const allInitStatements = [...this.moduleInitStatements, ...initStatements];
+    if (allInitStatements.length > 0) {
       result += '\n';
       result += 'func init() {\n';
-      for (const stmt of initStatements) {
+      for (const stmt of allInitStatements) {
         result += `\t${stmt}\n`;
       }
       result += '}\n';
@@ -668,6 +671,226 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (node.type instanceof ir.TupleType) {
       const typeName = this.registerTupleType(node.type);
       tupleTypeDef = this.generateTupleTypeInline(typeName);
+    }
+
+    // Check if initializer is an array method call (.map, .filter, .reduce)
+    if (node.initializer instanceof ir.CallExpression &&
+        node.initializer.callee instanceof ir.MemberExpression) {
+      const memberExpr = node.initializer.callee;
+      const methodName = memberExpr.property instanceof ir.Identifier
+        ? memberExpr.property.name
+        : '';
+
+      // Transform array.map() to for loop
+      if (methodName === 'map' && node.initializer.args.length === 1) {
+        const arrayExpr = memberExpr.object.accept(this);
+        const callback = node.initializer.args[0];
+
+        // Get element type from the result array type or infer from source array
+        let elementType = 'interface{}';
+        if (node.type instanceof ir.ArrayType) {
+          elementType = node.type.elementType.accept(this);
+        } else if (memberExpr.object instanceof ir.Identifier && memberExpr.object.inferredType instanceof ir.ArrayType) {
+          // Infer from source array's element type
+          elementType = memberExpr.object.inferredType.elementType.accept(this);
+        } else if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          // Try to infer from callback return type
+          if (callback.body instanceof ir.BlockStatement) {
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              const returnExpr = returnStmt.argument;
+              if (returnExpr instanceof ir.BinaryExpression) {
+                // Infer from binary expression
+                const leftType = returnExpr.left instanceof ir.Identifier && returnExpr.left.inferredType;
+                if (leftType instanceof ir.PrimitiveType) {
+                  elementType = leftType.accept(this);
+                }
+              }
+            }
+          } else if (callback.body instanceof ir.BinaryExpression) {
+            // Simple expression body like: n => n * 2
+            // Infer element type from callback parameter
+            if (callback.parameters.length > 0) {
+              const paramType = callback.parameters[0].type;
+              if (paramType) {
+                elementType = paramType.accept(this);
+              }
+            }
+          }
+        }
+
+        // Extract callback parameters and body
+        if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          const paramName = callback.parameters.length > 0 ? callback.parameters[0].name : 'item';
+          const indexName = callback.parameters.length > 1 ? callback.parameters[1].name : 'i';
+
+          // Handle arrow function body
+          let body: string;
+          if (callback.body instanceof ir.BlockStatement) {
+            // Block body with return statement
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              body = returnStmt.argument.accept(this);
+            } else {
+              body = callback.body.accept(this);
+            }
+          } else {
+            // Expression body
+            body = callback.body.accept(this);
+          }
+
+          if (this.isModuleLevel) {
+            // At module level: generate declaration and add init code
+            let initCode = `${name} = make([]${elementType}, len(${arrayExpr}))\n`;
+            initCode += `\tfor ${indexName}, ${paramName} := range ${arrayExpr} {\n`;
+            initCode += `\t\t${name}[${indexName}] = ${body}\n`;
+            initCode += `\t}`;
+            this.moduleInitStatements.push(initCode);
+            // Return only the type declaration
+            return `var ${name} []${elementType}`;
+          } else {
+            // Inside function: generate inline with :=
+            let result = `${name} := make([]${elementType}, len(${arrayExpr}))\n`;
+            result += `${this.indent()}for ${indexName}, ${paramName} := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}${name}[${indexName}] = ${body}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}`;
+            return result;
+          }
+        }
+      }
+
+      // Transform array.filter() to for loop
+      if (methodName === 'filter' && node.initializer.args.length === 1) {
+        const arrayExpr = memberExpr.object.accept(this);
+        const callback = node.initializer.args[0];
+
+        // Get element type from the result array type or infer from source array
+        let elementType = 'interface{}';
+        if (node.type instanceof ir.ArrayType) {
+          elementType = node.type.elementType.accept(this);
+        } else if (memberExpr.object instanceof ir.Identifier && memberExpr.object.inferredType instanceof ir.ArrayType) {
+          // Infer from source array's element type (filter preserves element type)
+          elementType = memberExpr.object.inferredType.elementType.accept(this);
+        } else if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          // Try to infer from callback parameter type
+          if (callback.parameters.length > 0) {
+            const paramType = callback.parameters[0].type;
+            if (paramType) {
+              elementType = paramType.accept(this);
+            }
+          }
+        }
+
+        // Extract callback parameters and body
+        if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          const paramName = callback.parameters.length > 0 ? callback.parameters[0].name : 'item';
+
+          // Handle arrow function body
+          let condition: string;
+          if (callback.body instanceof ir.BlockStatement) {
+            // Block body with return statement
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              condition = returnStmt.argument.accept(this);
+            } else {
+              condition = callback.body.accept(this);
+            }
+          } else {
+            // Expression body
+            condition = callback.body.accept(this);
+          }
+
+          if (this.isModuleLevel) {
+            // At module level: generate declaration and add init code
+            let initCode = `${name} = make([]${elementType}, 0)\n`;
+            initCode += `\tfor _, ${paramName} := range ${arrayExpr} {\n`;
+            initCode += `\t\tif ${condition} {\n`;
+            initCode += `\t\t\t${name} = append(${name}, ${paramName})\n`;
+            initCode += `\t\t}\n`;
+            initCode += `\t}`;
+            this.moduleInitStatements.push(initCode);
+            // Return only the type declaration
+            return `var ${name} []${elementType}`;
+          } else {
+            // Inside function: generate inline with :=
+            let result = `${name} := make([]${elementType}, 0)\n`;
+            result += `${this.indent()}for _, ${paramName} := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}if ${condition} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}${name} = append(${name}, ${paramName})\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}`;
+            return result;
+          }
+        }
+      }
+
+      // Transform array.reduce() to for loop
+      if (methodName === 'reduce' && node.initializer.args.length >= 1) {
+        const arrayExpr = memberExpr.object.accept(this);
+        const callback = node.initializer.args[0];
+        const initialValue = node.initializer.args.length > 1 ? node.initializer.args[1] : null;
+
+        // Extract callback parameters and body
+        if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          const accName = callback.parameters.length > 0 ? callback.parameters[0].name : 'acc';
+          const paramName = callback.parameters.length > 1 ? callback.parameters[1].name : 'item';
+
+          // Handle arrow function body
+          let body: string;
+          if (callback.body instanceof ir.BlockStatement) {
+            // Block body with return statement
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              body = returnStmt.argument.accept(this);
+            } else {
+              body = callback.body.accept(this);
+            }
+          } else {
+            // Expression body - replace accumulator variable with the result variable
+            body = callback.body.accept(this);
+          }
+
+          // Replace accumulator variable references with the result variable
+          body = body.replace(new RegExp(`\\b${accName}\\b`, 'g'), name);
+
+          if (this.isModuleLevel) {
+            // At module level: generate declaration and add init code
+            let initCode = '';
+            if (initialValue) {
+              initCode += `${name} = ${initialValue.accept(this)}\n`;
+            } else {
+              initCode += `${name} = 0\n`;
+            }
+            initCode += `\tfor _, ${paramName} := range ${arrayExpr} {\n`;
+            initCode += `\t\t${name} = ${body}\n`;
+            initCode += `\t}`;
+            this.moduleInitStatements.push(initCode);
+            // Return only the type declaration
+            const typeName = node.type ? node.type.accept(this) : 'int';
+            return `var ${name} ${typeName}`;
+          } else {
+            // Inside function: generate inline with :=
+            let result = '';
+            if (initialValue) {
+              result += `${name} := ${initialValue.accept(this)}\n`;
+            } else {
+              result += `${name} := 0\n`;
+            }
+            result += `${this.indent()}for _, ${paramName} := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}${name} = ${body}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}`;
+            return result;
+          }
+        }
+      }
     }
 
     // Use type inference for variables with 'any' type + literal initializer
