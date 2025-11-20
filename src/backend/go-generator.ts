@@ -2046,11 +2046,38 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
    * 1. All members are object types
    * 2. All members have a common property with different literal values
    */
+  /**
+   * Check if a union type should use plain interface{} without methods
+   * (i.e., union of primitives only, mapped to interface{} for any strategy)
+   */
+  private isPlainInterfaceUnion(union: ir.UnionType): boolean {
+    // Check if using 'any' strategy
+    if (this.options.unionStrategy === 'any') {
+      return true;
+    }
+
+    // Check if all types are primitives (no object types or type references)
+    return union.types.every(t => {
+      if (t instanceof ir.PrimitiveType) return true;
+      if (t instanceof ir.LiteralType) return true;
+      return false;
+    });
+  }
+
   private isDiscriminatedUnion(union: ir.UnionType): boolean {
     if (union.types.length < 2) return false;
 
+    // Resolve TypeReferences to their actual types
+    const resolvedTypes = union.types.map(type => {
+      if (type instanceof ir.TypeReference) {
+        const aliased = this.typeAliasMap.get(type.name);
+        if (aliased) return aliased;
+      }
+      return type;
+    });
+
     // Check if all types are object-like (ObjectType, InterfaceDeclaration, or TypeReference to object types)
-    const allObjectLike = union.types.every(type => {
+    const allObjectLike = resolvedTypes.every(type => {
       if (type instanceof ir.ObjectType) return true;
       if (type instanceof ir.TypeReference) {
         // Check if it's a reference to an interface or type alias
@@ -2062,7 +2089,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (!allObjectLike) return false;
 
     // Find common properties with literal types
-    const firstType = union.types[0];
+    const firstType = resolvedTypes[0];
     if (!(firstType instanceof ir.ObjectType)) return false;
 
     const firstProps = firstType.properties;
@@ -2070,7 +2097,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       if (prop.type instanceof ir.LiteralType) {
         // Check if all other types have this property with different literal values
         const propName = prop.name;
-        const hasDiscriminant = union.types.every((type, index) => {
+        const hasDiscriminant = resolvedTypes.every((type, index) => {
           if (!(type instanceof ir.ObjectType)) return false;
           const matchingProp = type.properties.find(p => p.name === propName);
           if (!matchingProp || !(matchingProp.type instanceof ir.LiteralType)) return false;
@@ -2133,14 +2160,25 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Interface-based discriminated union
         // Find discriminant field
         let discriminantField = '';
-        if (union.types[0] instanceof ir.ObjectType) {
-          const firstType = union.types[0] as ir.ObjectType;
+        let firstResolvedType = union.types[0];
+        if (firstResolvedType instanceof ir.TypeReference) {
+          const aliased = this.typeAliasMap.get(firstResolvedType.name);
+          if (aliased) firstResolvedType = aliased;
+        }
+
+        if (firstResolvedType instanceof ir.ObjectType) {
+          const firstType = firstResolvedType as ir.ObjectType;
           for (const prop of firstType.properties) {
             if (prop.type instanceof ir.LiteralType) {
               const propName = prop.name;
               const allHaveProp = union.types.every(type => {
-                if (!(type instanceof ir.ObjectType)) return false;
-                return type.properties.some(p => p.name === propName && p.type instanceof ir.LiteralType);
+                let resolvedType = type;
+                if (type instanceof ir.TypeReference) {
+                  const aliased = this.typeAliasMap.get(type.name);
+                  if (aliased) resolvedType = aliased;
+                }
+                if (!(resolvedType instanceof ir.ObjectType)) return false;
+                return resolvedType.properties.some(p => p.name === propName && p.type instanceof ir.LiteralType);
               });
               if (allHaveProp) {
                 discriminantField = propName;
@@ -2160,8 +2198,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
         // Generate concrete struct types for each variant
         for (let i = 0; i < union.types.length; i++) {
-          const type = union.types[i];
-          const semanticName = this.getSemanticTypeName(type);
+          let type = union.types[i];
+
+          // Resolve TypeReference to actual type
+          if (type instanceof ir.TypeReference) {
+            const aliased = this.typeAliasMap.get(type.name);
+            if (aliased) type = aliased;
+          }
+
+          // For discriminated unions, use the discriminant literal value as the semantic name
+          let semanticName = this.getSemanticTypeName(type);
+          if (type instanceof ir.ObjectType && discriminantField) {
+            const discriminantProp = type.properties.find(p => p.name === discriminantField);
+            if (discriminantProp && discriminantProp.type instanceof ir.LiteralType) {
+              const literalValue = (discriminantProp.type as ir.LiteralType).value;
+              semanticName = this.capitalize(String(literalValue));
+            }
+          }
+
           const variantName = `${semanticName}${name}`;
 
           if (type instanceof ir.ObjectType) {
@@ -2591,17 +2645,152 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitSwitchStatement(node: ir.SwitchStatement): string {
-    let result = `switch ${node.discriminant.accept(this)} {\n`;
+    // Check if this is a switch on a discriminated union's discriminant field
+    // Pattern: switch (result.status) where result is a discriminated union
+    let isDiscriminatedSwitch = false;
+    let unionTypeName = '';
+    let discriminantField = '';
+    let varName = '';
+    let unionType: ir.UnionType | null = null;
 
-    this.increaseIndent();
-    for (const caseNode of node.cases) {
-      result += this.visitSwitchCase(caseNode);
+    if (node.discriminant instanceof ir.MemberExpression) {
+      const memberExpr = node.discriminant;
+
+      // Get the discriminant field name
+      if (memberExpr.property instanceof ir.Identifier) {
+        discriminantField = memberExpr.property.name;
+      }
+
+      // Get the object being accessed
+      if (memberExpr.object instanceof ir.Identifier) {
+        varName = memberExpr.object.name;
+
+        // Try to find the type of this variable
+        if (memberExpr.object.inferredType instanceof ir.TypeReference) {
+          unionTypeName = memberExpr.object.inferredType.name;
+          const aliasedType = this.typeAliasMap.get(unionTypeName);
+
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+            // Check if this is a discriminated union
+            if (this.isDiscriminatedUnion(unionType)) {
+              isDiscriminatedSwitch = true;
+            }
+          }
+        }
+      }
     }
-    this.decreaseIndent();
 
-    result += `${this.indent()}}`;
+    if (isDiscriminatedSwitch && unionType) {
+      // Generate a type switch instead of a value switch
+      const switchVar = varName.charAt(0);
+      let result = `switch ${switchVar} := ${varName}.(type) {\n`;
 
-    return result;
+      this.increaseIndent();
+      let hasDefaultCase = false;
+      for (const caseNode of node.cases) {
+        if (caseNode.test instanceof ir.Literal) {
+          // Find the corresponding variant type for this literal value
+          const literalValue = (caseNode.test as ir.Literal).value;
+          const variantType = this.findVariantTypeForLiteral(unionType, discriminantField, literalValue, unionTypeName);
+
+          if (variantType) {
+            result += `${this.indent()}case ${variantType}:\n`;
+          } else {
+            // Fallback to regular case
+            result += `${this.indent()}case ${caseNode.test.accept(this)}:\n`;
+          }
+        } else if (!caseNode.test) {
+          result += `${this.indent()}default:\n`;
+          hasDefaultCase = true;
+        } else {
+          result += `${this.indent()}case ${caseNode.test.accept(this)}:\n`;
+        }
+
+        this.increaseIndent();
+        // Generate the case body, with references to varName replaced by switchVar
+        for (const stmt of caseNode.consequent) {
+          const stmtCode = this.visitStatementWithVarReplacement(stmt, varName, switchVar);
+          result += `${this.indent()}${stmtCode}\n`;
+        }
+        this.decreaseIndent();
+      }
+
+      // Add default case if not present to satisfy Go's exhaustiveness requirement
+      if (!hasDefaultCase) {
+        result += `${this.indent()}default:\n`;
+        this.increaseIndent();
+        result += `${this.indent()}return ""\n`;
+        this.decreaseIndent();
+      }
+
+      this.decreaseIndent();
+
+      result += `${this.indent()}}`;
+      return result;
+    } else {
+      // Regular switch statement
+      let result = `switch ${node.discriminant.accept(this)} {\n`;
+
+      this.increaseIndent();
+      for (const caseNode of node.cases) {
+        result += this.visitSwitchCase(caseNode);
+      }
+      this.decreaseIndent();
+
+      result += `${this.indent()}}`;
+
+      return result;
+    }
+  }
+
+  /**
+   * Find the variant type name for a given literal value in a discriminated union
+   */
+  private findVariantTypeForLiteral(
+    unionType: ir.UnionType,
+    discriminantField: string,
+    literalValue: any,
+    unionTypeName: string
+  ): string | null {
+    for (let i = 0; i < unionType.types.length; i++) {
+      let type = unionType.types[i];
+
+      // Resolve TypeReference to actual type
+      if (type instanceof ir.TypeReference) {
+        const aliased = this.typeAliasMap.get(type.name);
+        if (aliased) type = aliased;
+      }
+
+      if (type instanceof ir.ObjectType) {
+        const matchingProp = type.properties.find(p => p.name === discriminantField);
+        if (matchingProp && matchingProp.type instanceof ir.LiteralType) {
+          const propLiteral = matchingProp.type as ir.LiteralType;
+          if (propLiteral.value === literalValue) {
+            // Found the matching variant
+            // Use the discriminant literal value as the semantic name
+            const semanticName = this.capitalize(String(literalValue));
+            return `${semanticName}${unionTypeName}`;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Visit a statement with variable name replacement
+   * Used in type switches to replace references to the original variable with the type-switched variable
+   */
+  private visitStatementWithVarReplacement(stmt: ir.Statement, oldVar: string, newVar: string): string {
+    // For now, just generate normally and do string replacement
+    // A more sophisticated approach would traverse the AST
+    const stmtCode = stmt.accept(this);
+
+    // Replace references: oldVar.field -> newVar.field
+    // Use word boundaries to avoid partial matches
+    const regex = new RegExp(`\\b${oldVar}\\.`, 'g');
+    return stmtCode.replace(regex, `${newVar}.`);
   }
 
   visitSwitchCase(node: ir.SwitchCase): string {
@@ -3096,13 +3285,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitBinaryExpression(node: ir.BinaryExpression): string {
     // Special handling for typeof comparisons on union types
-    // Pattern: typeof value === 'string' → value.IsString()
+    // Pattern: typeof value === 'string' → value.IsString() or type assertion
     if ((node.operator === '===' || node.operator === '==') &&
         node.left instanceof ir.UnaryExpression && node.left.operator === 'typeof' &&
         node.right instanceof ir.Literal && typeof node.right.value === 'string') {
 
       const arg = node.left.argument;
       const typeName = node.right.value as string;
+      const varName = arg.accept(this);
+
+      // Map TypeScript typeof strings to Go types
+      const goTypeMap: Record<string, string> = {
+        'string': 'string',
+        'number': 'float64',
+        'boolean': 'bool',
+        'object': 'interface{}',
+      };
 
       // Check if the argument has a union type (directly or via type reference)
       let unionType: ir.UnionType | null = null;
@@ -3119,8 +3317,19 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       if (unionType) {
+        // Check if the variable has a named type (TypeReference)
+        // Named union types use tagged union structs with methods
+        // Only anonymous unions (direct union type, not via type alias) should use type assertions
+        const isNamedType = arg.inferredType instanceof ir.TypeReference;
 
-        // Find the matching type in the union
+        // Check if this union maps to plain interface{} without methods
+        if (this.isPlainInterfaceUnion(unionType) && !isNamedType) {
+          // Use type assertion for anonymous plain interface{} types
+          const goType = goTypeMap[typeName] || typeName;
+          return `func() bool { _, ok := ${varName}.(${goType}); return ok }()`;
+        }
+
+        // Find the matching type in the union for tagged/interface union types
         for (const type of unionType.types) {
           let matchesType = false;
 
@@ -3136,7 +3345,6 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
           if (matchesType) {
             const semanticName = this.getSemanticTypeName(type);
-            const varName = arg.accept(this);
             return `${varName}.Is${semanticName}()`;
           }
         }
@@ -3150,6 +3358,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
       const arg = node.left.argument;
       const typeName = node.right.value as string;
+      const varName = arg.accept(this);
+
+      // Map TypeScript typeof strings to Go types
+      const goTypeMap: Record<string, string> = {
+        'string': 'string',
+        'number': 'float64',
+        'boolean': 'bool',
+        'object': 'interface{}',
+      };
 
       let unionType: ir.UnionType | null = null;
       if (arg.inferredType) {
@@ -3164,6 +3381,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       if (unionType) {
+        // Check if the variable has a named type (TypeReference)
+        // Named union types use tagged union structs with methods
+        // Only anonymous unions (direct union type, not via type alias) should use type assertions
+        const isNamedType = arg.inferredType instanceof ir.TypeReference;
+
+        // Check if this union maps to plain interface{} without methods
+        if (this.isPlainInterfaceUnion(unionType) && !isNamedType) {
+          // Use type assertion for anonymous plain interface{} types
+          const goType = goTypeMap[typeName] || typeName;
+          return `func() bool { _, ok := ${varName}.(${goType}); return !ok }()`;
+        }
 
         for (const type of unionType.types) {
           let matchesType = false;
@@ -3180,7 +3408,6 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
           if (matchesType) {
             const semanticName = this.getSemanticTypeName(type);
-            const varName = arg.accept(this);
             return `!${varName}.Is${semanticName}()`;
           }
         }
@@ -3266,7 +3493,20 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     for (let i = 0; i < node.quasis.length; i++) {
       format += node.quasis[i];
       if (i < node.expressions.length) {
-        const expr = node.expressions[i];
+        let expr = node.expressions[i];
+
+        // Unwrap JSON.stringify() calls since fmt.Sprintf %v handles it
+        if (expr instanceof ir.CallExpression &&
+            expr.callee instanceof ir.MemberExpression &&
+            expr.callee.object instanceof ir.Identifier &&
+            expr.callee.object.name === 'JSON' &&
+            expr.callee.property instanceof ir.Identifier &&
+            expr.callee.property.name === 'stringify' &&
+            expr.args.length > 0) {
+          // Use the argument to JSON.stringify instead of the call itself
+          expr = expr.args[0];
+        }
+
         let arg = expr.accept(this);
 
         // Use %s for string types, %v for others

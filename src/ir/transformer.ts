@@ -650,10 +650,29 @@ export class IRTransformer {
         );
 
       case ts.SyntaxKind.Identifier:
-        return new ir.Identifier(
+        const identifier = new ir.Identifier(
           (node as ts.Identifier).text,
           this.parser.getSourceLocation(node)
         );
+        // Set the inferred type using the TypeScript type checker
+        if (this.typeChecker) {
+          try {
+            const tsType = this.typeChecker.getTypeAtLocation(node);
+            if (tsType) {
+              const typeNode = this.typeChecker.typeToTypeNode(
+                tsType,
+                node,
+                ts.NodeBuilderFlags.NoTruncation
+              );
+              if (typeNode) {
+                identifier.inferredType = this.transformTypeNode(typeNode);
+              }
+            }
+          } catch (e) {
+            // Silently ignore type resolution errors
+          }
+        }
+        return identifier;
 
       case ts.SyntaxKind.NumericLiteral:
         const numLit = node as ts.NumericLiteral;
