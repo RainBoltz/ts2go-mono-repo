@@ -2648,8 +2648,107 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       return result;
-    } else {
-      // Regular if statement
+    }
+
+    // Check if this is a type guard function call pattern
+    // Pattern: if (isError(result)) { ... result.error ... }
+    let isTypeGuard = false;
+    let guardVarName = '';
+    let guardTypeName = '';
+
+    if (node.test instanceof ir.CallExpression &&
+        node.test.callee instanceof ir.Identifier &&
+        node.test.args.length === 1 &&
+        node.test.args[0] instanceof ir.Identifier) {
+
+      const functionName = node.test.callee.name;
+      const argName = node.test.args[0].name;
+
+      // Check if function name starts with "is" or "Is" (type guard pattern)
+      if (/^[Ii]s[A-Z]/.test(functionName)) {
+        isTypeGuard = true;
+        guardVarName = argName;
+        // Extract the type name from the function name (e.g., "IsError" -> "Error")
+        guardTypeName = functionName.replace(/^[Ii]s/, '');
+      }
+    }
+
+    if (isTypeGuard && guardVarName && guardTypeName) {
+      // Generate if with type assertion in the block
+      // Pattern: if IsError(result) { err := result.(ErrorResult); ... use err ... }
+      let result = `if ${node.test.accept(this)} `;
+
+      // Check if the variable has a discriminated union type
+      let needsAssertion = false;
+
+      if (node.test instanceof ir.CallExpression &&
+          node.test.args[0] instanceof ir.Identifier) {
+
+        let unionType: ir.UnionType | null = null;
+
+        if (node.test.args[0].inferredType instanceof ir.TypeReference) {
+          const aliasedType = this.typeAliasMap.get(node.test.args[0].inferredType.name);
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+          }
+        } else if (node.test.args[0].inferredType instanceof ir.UnionType) {
+          // Handle narrowed types (e.g., in else-if after first type guard)
+          unionType = node.test.args[0].inferredType;
+        }
+
+        if (unionType && this.isDiscriminatedUnion(unionType)) {
+          needsAssertion = true;
+        }
+      }
+
+      if (needsAssertion && node.consequent instanceof ir.BlockStatement && node.test instanceof ir.CallExpression) {
+        // Insert type assertion at the beginning of the block
+        const tempVar = guardVarName.substring(0, 3); // Use first 3 chars for temp var
+        const callExpr = node.test as ir.CallExpression;
+        const arg = callExpr.args[0];
+
+        // Get the union type name - use the one we found during needsAssertion check
+        let argTypeName = '';
+        if (arg instanceof ir.Identifier) {
+          if (arg.inferredType instanceof ir.TypeReference) {
+            argTypeName = arg.inferredType.name;
+          } else if (arg.inferredType instanceof ir.UnionType) {
+            // For narrowed types, use the original type name heuristic
+            // In practice, for discriminated unions, the base type name is often the same
+            argTypeName = guardVarName === arg.name ? 'Result' : ''; // TODO: improve this
+          }
+        }
+
+        const assertedType = `${guardTypeName}${argTypeName}`;
+
+        result += '{\n';
+        this.increaseIndent();
+        result += `${this.indent()}${tempVar} := ${guardVarName}.(${assertedType})\n`;
+
+        // Visit block statements, replacing references to guardVarName with tempVar
+        for (const stmt of node.consequent.statements) {
+          const stmtCode = stmt.accept(this);
+          const modifiedStmt = stmtCode.replace(new RegExp(`\\b${guardVarName}\\b`, 'g'), tempVar);
+          result += `${this.indent()}${modifiedStmt}\n`;
+        }
+
+        this.decreaseIndent();
+        result += `${this.indent()}}`;
+
+        if (node.alternate) {
+          if (node.alternate instanceof ir.IfStatement) {
+            result += ` else ${node.alternate.accept(this)}`;
+          } else {
+            result += ` else ${node.alternate.accept(this)}`;
+          }
+        }
+
+        return result;
+      }
+    }
+
+    // Regular if statement
+    {
       let testExpr = node.test.accept(this);
 
       // If test is just an identifier that might be a pointer, add != nil check
@@ -3237,12 +3336,18 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       // Handle console.log() → fmt.Println()
+      // Handle console.error() → fmt.Fprintln(os.Stderr, ...)
       if (memberExpr.object instanceof ir.Identifier &&
-          memberExpr.object.name === 'console' &&
-          methodName === 'log') {
-        this.addImport('fmt');
+          memberExpr.object.name === 'console') {
         const args = node.args.map(arg => arg.accept(this)).join(', ');
-        return `fmt.Println(${args})`;
+        if (methodName === 'log') {
+          this.addImport('fmt');
+          return `fmt.Println(${args})`;
+        } else if (methodName === 'error') {
+          this.addImport('fmt');
+          this.addImport('os');
+          return `fmt.Fprintln(os.Stderr, ${args})`;
+        }
       }
     }
 

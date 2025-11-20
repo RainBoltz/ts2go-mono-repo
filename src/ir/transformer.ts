@@ -167,7 +167,13 @@ export class IRTransformer {
     if (!node.name) return null;
 
     const parameters = node.parameters.map(p => this.transformParameter(p));
-    const returnType = node.type ? this.transformTypeNode(node.type) : undefined;
+
+    // Handle type predicates (e.g., "result is Error") -> convert to boolean
+    let returnType = node.type ? this.transformTypeNode(node.type) : undefined;
+    if (node.type && ts.isTypePredicateNode(node.type)) {
+      returnType = new ir.PrimitiveType('boolean');
+    }
+
     const typeParameters = node.typeParameters?.map(tp => this.transformTypeParameter(tp));
     const body = node.body ? this.transformBlock(node.body) : undefined;
 
@@ -1251,6 +1257,11 @@ export class IRTransformer {
     // Try to get return type from explicit annotation first
     let returnType: ir.IRType | undefined = node.type ? this.transformTypeNode(node.type) : undefined;
 
+    // Handle type predicates -> convert to boolean
+    if (node.type && ts.isTypePredicateNode(node.type)) {
+      returnType = new ir.PrimitiveType('boolean');
+    }
+
     // If no explicit return type, try to infer from TypeScript type checker
     if (!returnType && this.typeChecker) {
       try {
@@ -1279,6 +1290,11 @@ export class IRTransformer {
   private transformFunctionExpression(node: ts.FunctionExpression): ir.FunctionExpression {
     // Try to get return type from explicit annotation first
     let returnType: ir.IRType | undefined = node.type ? this.transformTypeNode(node.type) : undefined;
+
+    // Handle type predicates -> convert to boolean
+    if (node.type && ts.isTypePredicateNode(node.type)) {
+      returnType = new ir.PrimitiveType('boolean');
+    }
 
     // If no explicit return type, try to infer from TypeScript type checker
     if (!returnType && this.typeChecker) {
