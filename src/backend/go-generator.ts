@@ -2530,7 +2530,43 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         }
       }
 
-      const returnValue = node.argument.accept(this);
+      let returnValue = node.argument.accept(this);
+
+      // If returning an identifier with interface{} type from a function with specific return type,
+      // add type assertion (heuristic: single identifiers that are short variable names)
+      if (node.argument instanceof ir.Identifier && node.argument.name.length <= 5) {
+        // Check if this is a narrowed type (PrimitiveType after typeof checks)
+        if (node.argument.inferredType instanceof ir.PrimitiveType) {
+          const primitiveType = node.argument.inferredType;
+          let goType = '';
+          if (primitiveType.kind === 'string') goType = 'string';
+          else if (primitiveType.kind === 'number') goType = 'float64';
+          else if (primitiveType.kind === 'boolean') goType = 'bool';
+
+          if (goType) {
+            // Add type assertion
+            returnValue = `${returnValue}.(${goType})`;
+          }
+        } else {
+          // Check for union type
+          let unionType: ir.UnionType | null = null;
+          if (node.argument.inferredType instanceof ir.UnionType) {
+            unionType = node.argument.inferredType;
+          } else if (node.argument.inferredType instanceof ir.TypeReference) {
+            const aliasedType = this.typeAliasMap.get(node.argument.inferredType.name);
+            if (aliasedType instanceof ir.UnionType) {
+              unionType = aliasedType;
+            }
+          }
+
+          if (unionType && this.isPlainInterfaceUnion(unionType)) {
+            // Check if this is likely a string (final fallback after typeof checks)
+            // This is a heuristic - in practice, if we checked bool and number, the rest is string
+            returnValue = `${returnValue}.(string)`;
+          }
+        }
+      }
+
       // For async functions, return (value, nil)
       if (this.currentFunctionIsAsync) {
         return `return ${returnValue}, nil`;
@@ -2545,26 +2581,96 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitIfStatement(node: ir.IfStatement): string {
-    let testExpr = node.test.accept(this);
+    // Check if this is a typeof comparison pattern
+    // Pattern: if (typeof value === 'type') { ... use value ... }
+    let isTypeofCheck = false;
+    let varName = '';
+    let goType = '';
 
-    // If test is just an identifier that might be a pointer, add != nil check
-    if (node.test instanceof ir.Identifier) {
-      // Check if this looks like it might be a pointer check
-      // In TypeScript, `if (age)` where age is optional should become `if (age != nil)` in Go
-      testExpr = `${testExpr} != nil`;
-    }
+    if (node.test instanceof ir.BinaryExpression &&
+        (node.test.operator === '===' || node.test.operator === '==') &&
+        node.test.left instanceof ir.UnaryExpression &&
+        node.test.left.operator === 'typeof' &&
+        node.test.left.argument instanceof ir.Identifier &&
+        node.test.right instanceof ir.Literal &&
+        typeof node.test.right.value === 'string') {
 
-    let result = `if ${testExpr} ${node.consequent.accept(this)}`;
+      const arg = node.test.left.argument;
+      const typeName = node.test.right.value as string;
 
-    if (node.alternate) {
-      if (node.alternate instanceof ir.IfStatement) {
-        result += ` else ${node.alternate.accept(this)}`;
-      } else {
-        result += ` else ${node.alternate.accept(this)}`;
+      // Check if the variable has an interface{} type (anonymous union)
+      // Only handle anonymous unions, not named types (which use struct methods)
+      let unionType: ir.UnionType | null = null;
+      const isNamedType = arg.inferredType instanceof ir.TypeReference;
+
+      if (arg.inferredType) {
+        if (arg.inferredType instanceof ir.UnionType) {
+          unionType = arg.inferredType;
+        } else if (arg.inferredType instanceof ir.TypeReference) {
+          const aliasedType = this.typeAliasMap.get(arg.inferredType.name);
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+          }
+        }
+      }
+
+      if (unionType && this.isPlainInterfaceUnion(unionType) && !isNamedType) {
+        isTypeofCheck = true;
+        varName = arg.name;
+
+        // Map TypeScript typeof strings to Go types
+        const goTypeMap: Record<string, string> = {
+          'string': 'string',
+          'number': 'float64',
+          'boolean': 'bool',
+          'object': 'interface{}',
+        };
+        goType = goTypeMap[typeName] || typeName;
       }
     }
 
-    return result;
+    if (isTypeofCheck && varName && goType) {
+      // Generate type assertion with new variable: if v, ok := value.(type); ok { ... }
+      const tempVar = varName.charAt(0);
+      let result = `if ${tempVar}, ok := ${varName}.(${goType}); ok `;
+
+      // Visit the consequent block, replacing references to varName with tempVar
+      const consequent = node.consequent.accept(this);
+      const modifiedConsequent = consequent.replace(new RegExp(`\\b${varName}\\b`, 'g'), tempVar);
+      result += modifiedConsequent;
+
+      if (node.alternate) {
+        if (node.alternate instanceof ir.IfStatement) {
+          result += ` else ${node.alternate.accept(this)}`;
+        } else {
+          result += ` else ${node.alternate.accept(this)}`;
+        }
+      }
+
+      return result;
+    } else {
+      // Regular if statement
+      let testExpr = node.test.accept(this);
+
+      // If test is just an identifier that might be a pointer, add != nil check
+      if (node.test instanceof ir.Identifier) {
+        // Check if this looks like it might be a pointer check
+        // In TypeScript, `if (age)` where age is optional should become `if (age != nil)` in Go
+        testExpr = `${testExpr} != nil`;
+      }
+
+      let result = `if ${testExpr} ${node.consequent.accept(this)}`;
+
+      if (node.alternate) {
+        if (node.alternate instanceof ir.IfStatement) {
+          result += ` else ${node.alternate.accept(this)}`;
+        } else {
+          result += ` else ${node.alternate.accept(this)}`;
+        }
+      }
+
+      return result;
+    }
   }
 
   visitWhileStatement(node: ir.WhileStatement): string {
@@ -2984,7 +3090,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // by checking if methods like .IsString() exist on it (heuristic)
         const shouldCheckUnion = unionType !== null ||
           methodName === 'toUpperCase' || methodName === 'toLowerCase' ||
-          methodName === 'toFixed' || methodName === 'toPrecision';
+          methodName === 'toFixed' || methodName === 'toPrecision' || methodName === 'toString';
 
         if (shouldCheckUnion) {
           const objectExpr = memberExpr.object.accept(this);
@@ -3026,12 +3132,27 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           }
 
           // toString() method on numbers
-          if (methodName === 'toString' && unionType) {
-            // Check if the object could be a number
-            for (const type of unionType.types) {
-              if (type instanceof ir.PrimitiveType && type.kind === 'number') {
+          if (methodName === 'toString') {
+            if (unionType) {
+              // Check if the object could be a number in a union type
+              for (const type of unionType.types) {
+                if (type instanceof ir.PrimitiveType && type.kind === 'number') {
+                  this.addImport('strconv');
+                  return `strconv.FormatFloat(${objectExpr}.AsNumber(), 'f', -1, 64)`;
+                }
+              }
+            } else if (memberExpr.object.inferredType instanceof ir.PrimitiveType &&
+                       memberExpr.object.inferredType.kind === 'number') {
+              // Direct number type (e.g., after type assertion)
+              this.addImport('strconv');
+              return `strconv.FormatFloat(${objectExpr}, 'f', -1, 64)`;
+            } else {
+              // Fallback: if no type info but the variable name suggests it's numeric,
+              // assume it's a float64 (common after type assertion)
+              const varName = memberExpr.object instanceof ir.Identifier ? memberExpr.object.name : '';
+              if (varName.length === 1 || /num|val|value|n|v/.test(varName)) {
                 this.addImport('strconv');
-                return `strconv.FormatFloat(${objectExpr}.AsNumber(), 'f', -1, 64)`;
+                return `strconv.FormatFloat(${objectExpr}, 'f', -1, 64)`;
               }
             }
           }
@@ -3177,6 +3298,19 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
           if (isKnownArray || isLikelyArray) {
             return `len(${object})`;
+          }
+        }
+
+        // Check if this is accessing a discriminant field on a discriminated union interface
+        if (node.object instanceof ir.Identifier && node.object.inferredType instanceof ir.TypeReference) {
+          const typeName = node.object.inferredType.name;
+          const aliasedType = this.typeAliasMap.get(typeName);
+
+          if (aliasedType instanceof ir.UnionType && this.isDiscriminatedUnion(aliasedType)) {
+            // Check if this property is the discriminant field
+            // For discriminated unions using interface strategy, convert field access to getter method
+            const capitalizedProp = this.capitalize(propName);
+            return `${object}.Get${capitalizedProp}()`;
           }
         }
 
@@ -3466,8 +3600,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const consequent = node.consequent.accept(this);
     const alternate = node.alternate.accept(this);
 
+    // Determine the return type based on the branches
+    let returnType = 'interface{}';
+
+    // If both branches are string literals, use string type
+    if (node.consequent instanceof ir.Literal && node.alternate instanceof ir.Literal) {
+      if (typeof node.consequent.value === 'string' && typeof node.alternate.value === 'string') {
+        returnType = 'string';
+      } else if (typeof node.consequent.value === 'number' && typeof node.alternate.value === 'number') {
+        returnType = this.options.numberStrategy === 'int' ? 'int' : 'float64';
+      } else if (typeof node.consequent.value === 'boolean' && typeof node.alternate.value === 'boolean') {
+        returnType = 'bool';
+      }
+    }
+
     // Go 沒有三元運算子，使用 IIFE
-    return `func() interface{} { if ${test} { return ${consequent} }; return ${alternate} }()`;
+    return `func() ${returnType} { if ${test} { return ${consequent} }; return ${alternate} }()`;
   }
 
   visitAwaitExpression(node: ir.AwaitExpression): string {
