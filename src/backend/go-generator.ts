@@ -2188,11 +2188,30 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           }
         }
 
+        // Determine the discriminant field type
+        let discriminantType = 'string'; // default
+        if (discriminantField && union.types.length > 0) {
+          let firstType = union.types[0];
+          if (firstType instanceof ir.TypeReference) {
+            const aliased = this.typeAliasMap.get(firstType.name);
+            if (aliased) firstType = aliased;
+          }
+          if (firstType instanceof ir.ObjectType) {
+            const discriminantProp = firstType.properties.find(p => p.name === discriminantField);
+            if (discriminantProp && discriminantProp.type instanceof ir.LiteralType) {
+              const literalValue = discriminantProp.type.value;
+              if (typeof literalValue === 'boolean') discriminantType = 'bool';
+              else if (typeof literalValue === 'number') discriminantType = this.options.numberStrategy === 'int' ? 'int' : 'float64';
+              else discriminantType = 'string';
+            }
+          }
+        }
+
         let result = `type ${name}${typeParams} interface {\n`;
         result += `\tis${name}()\n`;
         if (discriminantField) {
           const capitalizedField = this.capitalize(discriminantField);
-          result += `\tGet${capitalizedField}() string\n`;
+          result += `\tGet${capitalizedField}() ${discriminantType}\n`;
         }
         result += '}\n\n';
 
@@ -2219,8 +2238,8 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           const variantName = `${semanticName}${name}`;
 
           if (type instanceof ir.ObjectType) {
-            // Generate struct with actual fields
-            result += `type ${variantName} struct {\n`;
+            // Generate struct with actual fields (include type parameters from parent union)
+            result += `type ${variantName}${typeParams} struct {\n`;
             for (const prop of type.properties) {
               const fieldName = this.capitalize(prop.name);
               const fieldType = prop.type.accept(this);
@@ -2228,22 +2247,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
             }
             result += '}\n\n';
 
-            // Generate marker method
-            result += `func (${variantName[0].toLowerCase()} ${variantName}) is${name}() {}\n`;
+            // Generate marker method (with type parameters if any)
+            result += `func (${variantName[0].toLowerCase()} ${variantName}${typeParams}) is${name}() {}\n`;
 
-            // Generate discriminant accessor if present
+            // Generate discriminant accessor if present (with type parameters if any)
             if (discriminantField) {
               const capitalizedField = this.capitalize(discriminantField);
               const fieldName = this.capitalize(discriminantField);
-              result += `func (${variantName[0].toLowerCase()} ${variantName}) Get${capitalizedField}() string { return ${variantName[0].toLowerCase()}.${fieldName} }\n\n`;
+              result += `func (${variantName[0].toLowerCase()} ${variantName}${typeParams}) Get${capitalizedField}() ${discriminantType} { return ${variantName[0].toLowerCase()}.${fieldName} }\n\n`;
             } else {
               result += '\n';
             }
           } else {
             // Fallback for non-object types (shouldn't happen for discriminated unions)
             const typeName = this.getUnionMemberType(type);
-            result += `type ${variantName} struct { Value ${typeName} }\n`;
-            result += `func (${variantName}) is${name}() {}\n\n`;
+            result += `type ${variantName}${typeParams} struct { Value ${typeName} }\n`;
+            result += `func (${variantName}${typeParams}) is${name}() {}\n\n`;
           }
         }
 
