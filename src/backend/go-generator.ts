@@ -35,6 +35,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
   private isModuleLevel = true; // Track if we're at module level (vs inside function/method)
   private currentFunctionIsAsync = false; // Track if current function is async (for return statement handling)
+  private currentFunctionReturnType: string = ''; // Track current function's return type for zero value generation
   private moduleInitStatements: string[] = []; // Collect module-level initializations that need init() function
 
   constructor(options: CompilerOptions) {
@@ -175,6 +176,30 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   private capitalize(str: string): string {
     return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+
+  /**
+   * Get zero value for a Go type
+   */
+  private getZeroValueForType(typeName: string): string {
+    // Handle common primitive types
+    if (typeName === 'string') return '""';
+    if (typeName === 'int' || typeName === 'int64' || typeName === 'int32' ||
+        typeName === 'float64' || typeName === 'float32') return '0';
+    if (typeName === 'bool') return 'false';
+
+    // Pointer types return nil
+    if (typeName.startsWith('*')) return 'nil';
+
+    // Slices and maps
+    if (typeName.startsWith('[]') || typeName.startsWith('map[')) return 'nil';
+
+    // Interface types
+    if (typeName === 'interface{}' || typeName === 'any') return 'nil';
+
+    // For struct types or custom types, use the zero value constructor
+    // This is a fallback - in most cases we return nil for complex types
+    return 'nil';
   }
 
   // @ts-ignore - Currently unused but kept for future export detection logic
@@ -1099,6 +1124,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       const wasAsync = this.currentFunctionIsAsync;
       this.currentFunctionIsAsync = isAsync;
 
+      // Track function's return type for zero value generation
+      const wasReturnType = this.currentFunctionReturnType;
+      if (node.returnType && !isVoidReturn) {
+        this.currentFunctionReturnType = node.returnType.accept(this);
+      } else {
+        this.currentFunctionReturnType = '';
+      }
+
       // Add default parameter initializations
       for (const init of defaultInits) {
         result += `${this.indent()}${init}\n`;
@@ -1112,9 +1145,25 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         }
       }
 
+      // Add implicit return for async functions that don't end with a return statement
+      if (isAsync && node.body.statements.length > 0) {
+        const lastStmt = node.body.statements[node.body.statements.length - 1];
+        if (!(lastStmt instanceof ir.ReturnStatement)) {
+          // Add a default return based on return type
+          if (node.returnType && !isVoidReturn) {
+            const returnTypeName = node.returnType.accept(this);
+            const zeroValue = this.getZeroValueForType(returnTypeName);
+            result += `${this.indent()}return ${zeroValue}, nil\n`;
+          } else {
+            result += `${this.indent()}return nil\n`;
+          }
+        }
+      }
+
       // Restore flags
       this.isModuleLevel = wasModuleLevel;
       this.currentFunctionIsAsync = wasAsync;
+      this.currentFunctionReturnType = wasReturnType;
 
       this.decreaseIndent();
       result += `${this.indent()}}`;
@@ -2811,6 +2860,11 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
       // For async functions, return (value, nil)
       if (this.currentFunctionIsAsync) {
+        // If returning nil and we have a return type, use zero value instead
+        if (returnValue === 'nil' && this.currentFunctionReturnType) {
+          const zeroValue = this.getZeroValueForType(this.currentFunctionReturnType);
+          return `return ${zeroValue}, nil`;
+        }
         return `return ${returnValue}, nil`;
       }
       return `return ${returnValue}`;
