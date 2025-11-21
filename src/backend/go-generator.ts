@@ -3073,9 +3073,19 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitForStatement(node: ir.ForStatement): string {
-    let init = node.init ? (node.init instanceof ir.Expression ?
-      node.init.accept(this) :
-      node.init.accept(this).replace(/^var /, '').replace(/^const /, '')) : '';
+    let init = '';
+    if (node.init) {
+      if (node.init instanceof ir.Expression) {
+        init = node.init.accept(this);
+      } else {
+        // For variable declarations in for loops, use := instead of var
+        const initCode = node.init.accept(this);
+        init = initCode
+          .replace(/^var (\w+) (\w+) = /, '$1 := ')  // var i int = 0 -> i := 0
+          .replace(/^var (\w+) = /, '$1 := ')         // var i = 0 -> i := 0
+          .replace(/^const (\w+) = /, '$1 := ');      // const i = 0 -> i := 0
+      }
+    }
     let test = node.test ? node.test.accept(this) : '';
     let update = node.update ? node.update.accept(this) : '';
 
