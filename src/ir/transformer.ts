@@ -167,7 +167,13 @@ export class IRTransformer {
     if (!node.name) return null;
 
     const parameters = node.parameters.map(p => this.transformParameter(p));
-    const returnType = node.type ? this.transformTypeNode(node.type) : undefined;
+
+    // Handle type predicates (e.g., "result is Error") -> convert to boolean
+    let returnType = node.type ? this.transformTypeNode(node.type) : undefined;
+    if (node.type && ts.isTypePredicateNode(node.type)) {
+      returnType = new ir.PrimitiveType('boolean');
+    }
+
     const typeParameters = node.typeParameters?.map(tp => this.transformTypeParameter(tp));
     const body = node.body ? this.transformBlock(node.body) : undefined;
 
@@ -650,10 +656,29 @@ export class IRTransformer {
         );
 
       case ts.SyntaxKind.Identifier:
-        return new ir.Identifier(
+        const identifier = new ir.Identifier(
           (node as ts.Identifier).text,
           this.parser.getSourceLocation(node)
         );
+        // Set the inferred type using the TypeScript type checker
+        if (this.typeChecker) {
+          try {
+            const tsType = this.typeChecker.getTypeAtLocation(node);
+            if (tsType) {
+              const typeNode = this.typeChecker.typeToTypeNode(
+                tsType,
+                node,
+                ts.NodeBuilderFlags.NoTruncation
+              );
+              if (typeNode) {
+                identifier.inferredType = this.transformTypeNode(typeNode);
+              }
+            }
+          } catch (e) {
+            // Silently ignore type resolution errors
+          }
+        }
+        return identifier;
 
       case ts.SyntaxKind.NumericLiteral:
         const numLit = node as ts.NumericLiteral;
@@ -757,6 +782,13 @@ export class IRTransformer {
           true, // prefix
           this.parser.getSourceLocation(node)
         );
+
+      case ts.SyntaxKind.AsExpression:
+      case ts.SyntaxKind.TypeAssertionExpression:
+        // Type assertions (e.g., "x as const" or "<const>x") should be unwrapped
+        // We just transform the underlying expression and preserve its type info
+        const assertionExpr = node as ts.AsExpression | ts.TypeAssertion;
+        return this.transformExpression(assertionExpr.expression);
 
       default:
         // 預設返回 identifier
@@ -1225,6 +1257,11 @@ export class IRTransformer {
     // Try to get return type from explicit annotation first
     let returnType: ir.IRType | undefined = node.type ? this.transformTypeNode(node.type) : undefined;
 
+    // Handle type predicates -> convert to boolean
+    if (node.type && ts.isTypePredicateNode(node.type)) {
+      returnType = new ir.PrimitiveType('boolean');
+    }
+
     // If no explicit return type, try to infer from TypeScript type checker
     if (!returnType && this.typeChecker) {
       try {
@@ -1253,6 +1290,11 @@ export class IRTransformer {
   private transformFunctionExpression(node: ts.FunctionExpression): ir.FunctionExpression {
     // Try to get return type from explicit annotation first
     let returnType: ir.IRType | undefined = node.type ? this.transformTypeNode(node.type) : undefined;
+
+    // Handle type predicates -> convert to boolean
+    if (node.type && ts.isTypePredicateNode(node.type)) {
+      returnType = new ir.PrimitiveType('boolean');
+    }
 
     // If no explicit return type, try to infer from TypeScript type checker
     if (!returnType && this.typeChecker) {

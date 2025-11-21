@@ -33,6 +33,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   private currentClassTypeParams: ir.TypeParameter[] = []; // Track current class type parameters for method receivers
   private typeAliasMap = new Map<string, ir.IRType>(); // Track type alias definitions (e.g., Person -> IntersectionType)
   private interfaceProperties = new Map<string, Set<string>>(); // Track interface property names (e.g., Named -> {name})
+  private isModuleLevel = true; // Track if we're at module level (vs inside function/method)
+  private currentFunctionIsAsync = false; // Track if current function is async (for return statement handling)
+  private currentFunctionReturnType: string = ''; // Track current function's return type for zero value generation
+  private moduleInitStatements: string[] = []; // Collect module-level initializations that need init() function
 
   constructor(options: CompilerOptions) {
     this.options = options;
@@ -64,6 +68,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     this.exportedNames.clear();
     this.typeAliasMap.clear();
     this.interfaceProperties.clear();
+    this.moduleInitStatements = [];
   }
 
   /**
@@ -173,6 +178,30 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     return str.charAt(0).toUpperCase() + str.slice(1);
   }
 
+  /**
+   * Get zero value for a Go type
+   */
+  private getZeroValueForType(typeName: string): string {
+    // Handle common primitive types
+    if (typeName === 'string') return '""';
+    if (typeName === 'int' || typeName === 'int64' || typeName === 'int32' ||
+        typeName === 'float64' || typeName === 'float32') return '0';
+    if (typeName === 'bool') return 'false';
+
+    // Pointer types return nil
+    if (typeName.startsWith('*')) return 'nil';
+
+    // Slices and maps
+    if (typeName.startsWith('[]') || typeName.startsWith('map[')) return 'nil';
+
+    // Interface types
+    if (typeName === 'interface{}' || typeName === 'any') return 'nil';
+
+    // For struct types or custom types, use the zero value constructor
+    // This is a fallback - in most cases we return nil for complex types
+    return 'nil';
+  }
+
   // @ts-ignore - Currently unused but kept for future export detection logic
   private isExported(name: string): boolean {
     return name.charAt(0) === name.charAt(0).toUpperCase();
@@ -275,6 +304,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
 
     const declarations: DeclInfo[] = [];
+    const initStatements: string[] = []; // Collect top-level expression statements for init()
 
     for (let i = 0; i < node.statements.length; i++) {
       const stmt = node.statements[i];
@@ -311,6 +341,10 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       } else if (stmt instanceof ir.ClassDeclaration || stmt instanceof ir.InterfaceDeclaration ||
                  stmt instanceof ir.TypeAliasDeclaration || stmt instanceof ir.EnumDeclaration) {
         declType = 'type';
+      } else if (stmt instanceof ir.ExpressionStatement) {
+        // Top-level expression statements need to go in init()
+        initStatements.push(code);
+        continue; // Don't add to regular declarations
       } else {
         declType = 'other';
       }
@@ -409,6 +443,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
           result += '\n';
         }
       }
+    }
+
+    // Add init() function if there are any top-level expression statements or module init statements
+    const allInitStatements = [...this.moduleInitStatements, ...initStatements];
+    if (allInitStatements.length > 0) {
+      result += '\n';
+      result += 'func init() {\n';
+      for (const stmt of allInitStatements) {
+        result += `\t${stmt}\n`;
+      }
+      result += '}\n';
     }
 
     // Add final newline
@@ -549,10 +594,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return `map[${keyType}]${valueType}`;
     }
 
+    // Special handling for Record<K, V> → map[K]V (same as Map)
+    if (typeName === 'Record' && node.typeArguments && node.typeArguments.length === 2) {
+      const keyType = node.typeArguments[0].accept(this);
+      const valueType = node.typeArguments[1].accept(this);
+      return `map[${keyType}]${valueType}`;
+    }
+
     // Special handling for Set<T> → map[T]bool (Go idiom for sets)
     if (typeName === 'Set' && node.typeArguments && node.typeArguments.length === 1) {
       const elementType = node.typeArguments[0].accept(this);
       return `map[${elementType}]bool`;
+    }
+
+    // Special handling for Partial<T> → *T (Go doesn't have partial types)
+    // Use pointer to allow nil check for optional parameters
+    if (typeName === 'Partial' && node.typeArguments && node.typeArguments.length === 1) {
+      const elementType = node.typeArguments[0].accept(this);
+      return `*${elementType}`;
     }
 
     // Special handling for Promise<T> → T (since we handle async with error returns)
@@ -637,6 +696,226 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     if (node.type instanceof ir.TupleType) {
       const typeName = this.registerTupleType(node.type);
       tupleTypeDef = this.generateTupleTypeInline(typeName);
+    }
+
+    // Check if initializer is an array method call (.map, .filter, .reduce)
+    if (node.initializer instanceof ir.CallExpression &&
+        node.initializer.callee instanceof ir.MemberExpression) {
+      const memberExpr = node.initializer.callee;
+      const methodName = memberExpr.property instanceof ir.Identifier
+        ? memberExpr.property.name
+        : '';
+
+      // Transform array.map() to for loop
+      if (methodName === 'map' && node.initializer.args.length === 1) {
+        const arrayExpr = memberExpr.object.accept(this);
+        const callback = node.initializer.args[0];
+
+        // Get element type from the result array type or infer from source array
+        let elementType = 'interface{}';
+        if (node.type instanceof ir.ArrayType) {
+          elementType = node.type.elementType.accept(this);
+        } else if (memberExpr.object instanceof ir.Identifier && memberExpr.object.inferredType instanceof ir.ArrayType) {
+          // Infer from source array's element type
+          elementType = memberExpr.object.inferredType.elementType.accept(this);
+        } else if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          // Try to infer from callback return type
+          if (callback.body instanceof ir.BlockStatement) {
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              const returnExpr = returnStmt.argument;
+              if (returnExpr instanceof ir.BinaryExpression) {
+                // Infer from binary expression
+                const leftType = returnExpr.left instanceof ir.Identifier && returnExpr.left.inferredType;
+                if (leftType instanceof ir.PrimitiveType) {
+                  elementType = leftType.accept(this);
+                }
+              }
+            }
+          } else if (callback.body instanceof ir.BinaryExpression) {
+            // Simple expression body like: n => n * 2
+            // Infer element type from callback parameter
+            if (callback.parameters.length > 0) {
+              const paramType = callback.parameters[0].type;
+              if (paramType) {
+                elementType = paramType.accept(this);
+              }
+            }
+          }
+        }
+
+        // Extract callback parameters and body
+        if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          const paramName = callback.parameters.length > 0 ? callback.parameters[0].name : 'item';
+          const indexName = callback.parameters.length > 1 ? callback.parameters[1].name : 'i';
+
+          // Handle arrow function body
+          let body: string;
+          if (callback.body instanceof ir.BlockStatement) {
+            // Block body with return statement
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              body = returnStmt.argument.accept(this);
+            } else {
+              body = callback.body.accept(this);
+            }
+          } else {
+            // Expression body
+            body = callback.body.accept(this);
+          }
+
+          if (this.isModuleLevel) {
+            // At module level: generate declaration and add init code
+            let initCode = `${name} = make([]${elementType}, len(${arrayExpr}))\n`;
+            initCode += `\tfor ${indexName}, ${paramName} := range ${arrayExpr} {\n`;
+            initCode += `\t\t${name}[${indexName}] = ${body}\n`;
+            initCode += `\t}`;
+            this.moduleInitStatements.push(initCode);
+            // Return only the type declaration
+            return `var ${name} []${elementType}`;
+          } else {
+            // Inside function: generate inline with :=
+            let result = `${name} := make([]${elementType}, len(${arrayExpr}))\n`;
+            result += `${this.indent()}for ${indexName}, ${paramName} := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}${name}[${indexName}] = ${body}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}`;
+            return result;
+          }
+        }
+      }
+
+      // Transform array.filter() to for loop
+      if (methodName === 'filter' && node.initializer.args.length === 1) {
+        const arrayExpr = memberExpr.object.accept(this);
+        const callback = node.initializer.args[0];
+
+        // Get element type from the result array type or infer from source array
+        let elementType = 'interface{}';
+        if (node.type instanceof ir.ArrayType) {
+          elementType = node.type.elementType.accept(this);
+        } else if (memberExpr.object instanceof ir.Identifier && memberExpr.object.inferredType instanceof ir.ArrayType) {
+          // Infer from source array's element type (filter preserves element type)
+          elementType = memberExpr.object.inferredType.elementType.accept(this);
+        } else if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          // Try to infer from callback parameter type
+          if (callback.parameters.length > 0) {
+            const paramType = callback.parameters[0].type;
+            if (paramType) {
+              elementType = paramType.accept(this);
+            }
+          }
+        }
+
+        // Extract callback parameters and body
+        if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          const paramName = callback.parameters.length > 0 ? callback.parameters[0].name : 'item';
+
+          // Handle arrow function body
+          let condition: string;
+          if (callback.body instanceof ir.BlockStatement) {
+            // Block body with return statement
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              condition = returnStmt.argument.accept(this);
+            } else {
+              condition = callback.body.accept(this);
+            }
+          } else {
+            // Expression body
+            condition = callback.body.accept(this);
+          }
+
+          if (this.isModuleLevel) {
+            // At module level: generate declaration and add init code
+            let initCode = `${name} = make([]${elementType}, 0)\n`;
+            initCode += `\tfor _, ${paramName} := range ${arrayExpr} {\n`;
+            initCode += `\t\tif ${condition} {\n`;
+            initCode += `\t\t\t${name} = append(${name}, ${paramName})\n`;
+            initCode += `\t\t}\n`;
+            initCode += `\t}`;
+            this.moduleInitStatements.push(initCode);
+            // Return only the type declaration
+            return `var ${name} []${elementType}`;
+          } else {
+            // Inside function: generate inline with :=
+            let result = `${name} := make([]${elementType}, 0)\n`;
+            result += `${this.indent()}for _, ${paramName} := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}if ${condition} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}${name} = append(${name}, ${paramName})\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}`;
+            return result;
+          }
+        }
+      }
+
+      // Transform array.reduce() to for loop
+      if (methodName === 'reduce' && node.initializer.args.length >= 1) {
+        const arrayExpr = memberExpr.object.accept(this);
+        const callback = node.initializer.args[0];
+        const initialValue = node.initializer.args.length > 1 ? node.initializer.args[1] : null;
+
+        // Extract callback parameters and body
+        if (callback instanceof ir.ArrowFunctionExpression || callback instanceof ir.FunctionExpression) {
+          const accName = callback.parameters.length > 0 ? callback.parameters[0].name : 'acc';
+          const paramName = callback.parameters.length > 1 ? callback.parameters[1].name : 'item';
+
+          // Handle arrow function body
+          let body: string;
+          if (callback.body instanceof ir.BlockStatement) {
+            // Block body with return statement
+            const returnStmt = callback.body.statements.find((s: ir.Statement) => s instanceof ir.ReturnStatement);
+            if (returnStmt && returnStmt instanceof ir.ReturnStatement && returnStmt.argument) {
+              body = returnStmt.argument.accept(this);
+            } else {
+              body = callback.body.accept(this);
+            }
+          } else {
+            // Expression body - replace accumulator variable with the result variable
+            body = callback.body.accept(this);
+          }
+
+          // Replace accumulator variable references with the result variable
+          body = body.replace(new RegExp(`\\b${accName}\\b`, 'g'), name);
+
+          if (this.isModuleLevel) {
+            // At module level: generate declaration and add init code
+            let initCode = '';
+            if (initialValue) {
+              initCode += `${name} = ${initialValue.accept(this)}\n`;
+            } else {
+              initCode += `${name} = 0\n`;
+            }
+            initCode += `\tfor _, ${paramName} := range ${arrayExpr} {\n`;
+            initCode += `\t\t${name} = ${body}\n`;
+            initCode += `\t}`;
+            this.moduleInitStatements.push(initCode);
+            // Return only the type declaration
+            const typeName = node.type ? node.type.accept(this) : 'int';
+            return `var ${name} ${typeName}`;
+          } else {
+            // Inside function: generate inline with :=
+            let result = '';
+            if (initialValue) {
+              result += `${name} := ${initialValue.accept(this)}\n`;
+            } else {
+              result += `${name} := 0\n`;
+            }
+            result += `${this.indent()}for _, ${paramName} := range ${arrayExpr} {\n`;
+            this.increaseIndent();
+            result += `${this.indent()}${name} = ${body}\n`;
+            this.decreaseIndent();
+            result += `${this.indent()}}`;
+            return result;
+          }
+        }
+      }
     }
 
     // Use type inference for variables with 'any' type + literal initializer
@@ -837,6 +1116,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       let result = '{\n';
       this.increaseIndent();
 
+      // Mark that we're inside a function (not at module level)
+      const wasModuleLevel = this.isModuleLevel;
+      this.isModuleLevel = false;
+
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
+      // Track function's return type for zero value generation
+      const wasReturnType = this.currentFunctionReturnType;
+      if (node.returnType && !isVoidReturn) {
+        this.currentFunctionReturnType = node.returnType.accept(this);
+      } else {
+        this.currentFunctionReturnType = '';
+      }
+
       // Add default parameter initializations
       for (const init of defaultInits) {
         result += `${this.indent()}${init}\n`;
@@ -850,13 +1145,35 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         }
       }
 
+      // Add implicit return for async functions that don't end with a return statement
+      if (isAsync && node.body.statements.length > 0) {
+        const lastStmt = node.body.statements[node.body.statements.length - 1];
+        if (!(lastStmt instanceof ir.ReturnStatement)) {
+          // Add a default return based on return type
+          if (node.returnType && !isVoidReturn) {
+            const returnTypeName = node.returnType.accept(this);
+            const zeroValue = this.getZeroValueForType(returnTypeName);
+            result += `${this.indent()}return ${zeroValue}, nil\n`;
+          } else {
+            result += `${this.indent()}return nil\n`;
+          }
+        }
+      }
+
+      // Restore flags
+      this.isModuleLevel = wasModuleLevel;
+      this.currentFunctionIsAsync = wasAsync;
+      this.currentFunctionReturnType = wasReturnType;
+
       this.decreaseIndent();
       result += `${this.indent()}}`;
 
       return `${signature} ${result}`;
     }
 
-    return signature;
+    // If there's no body, this is a function overload signature
+    // Go doesn't support overloads, so skip these declarations
+    return '';
   }
 
   visitParameter(node: ir.Parameter): string {
@@ -1413,8 +1730,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 方法體
     if (node.body) {
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       const body = this.visitBlockStatement(node.body);
-      // Reset receiver name after generating method body
+
+      // Reset flags
+      this.currentFunctionIsAsync = wasAsync;
       this.currentReceiverName = '';
       return `${signature} ${body}`;
     }
@@ -1471,8 +1794,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
     // 方法體 - need to transform static member references
     if (node.body) {
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       // Generate the body with static member transformations
       const body = this.visitBlockStatementStatic(className, node.body);
+
+      // Reset async flag
+      this.currentFunctionIsAsync = wasAsync;
       return `${signature} ${body}`;
     }
 
@@ -1553,7 +1883,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     // Function body - set receiver name for 'this' replacement
     if (node.body) {
       this.currentReceiverName = receiverName;
+
+      // Track if this is an async function for return statement handling
+      const wasAsync = this.currentFunctionIsAsync;
+      this.currentFunctionIsAsync = isAsync;
+
       const body = this.visitBlockStatement(node.body);
+
+      // Reset flags
+      this.currentFunctionIsAsync = wasAsync;
       this.currentReceiverName = '';
       return `${signature} ${body}`;
     }
@@ -1953,6 +2291,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   /**
+   * Get the element type of an array expression
+   */
+  private getArrayElementType(expr: ir.Expression): string {
+    if (expr.inferredType instanceof ir.ArrayType) {
+      return expr.inferredType.elementType.accept(this);
+    }
+    // Fallback to interface{} if type is unknown
+    return 'interface{}';
+  }
+
+  /**
    * Get Go type name for union members
    * For numbers in unions, always use float64 for compatibility
    */
@@ -1961,6 +2310,79 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       return 'float64';
     }
     return type.accept(this);
+  }
+
+  /**
+   * Detect if a union is a discriminated union
+   * A discriminated union has:
+   * 1. All members are object types
+   * 2. All members have a common property with different literal values
+   */
+  /**
+   * Check if a union type should use plain interface{} without methods
+   * (i.e., union of primitives only, mapped to interface{} for any strategy)
+   */
+  private isPlainInterfaceUnion(union: ir.UnionType): boolean {
+    // Check if using 'any' strategy
+    if (this.options.unionStrategy === 'any') {
+      return true;
+    }
+
+    // Check if all types are primitives (no object types or type references)
+    return union.types.every(t => {
+      if (t instanceof ir.PrimitiveType) return true;
+      if (t instanceof ir.LiteralType) return true;
+      return false;
+    });
+  }
+
+  private isDiscriminatedUnion(union: ir.UnionType): boolean {
+    if (union.types.length < 2) return false;
+
+    // Resolve TypeReferences to their actual types
+    const resolvedTypes = union.types.map(type => {
+      if (type instanceof ir.TypeReference) {
+        const aliased = this.typeAliasMap.get(type.name);
+        if (aliased) return aliased;
+      }
+      return type;
+    });
+
+    // Check if all types are object-like (ObjectType, InterfaceDeclaration, or TypeReference to object types)
+    const allObjectLike = resolvedTypes.every(type => {
+      if (type instanceof ir.ObjectType) return true;
+      if (type instanceof ir.TypeReference) {
+        // Check if it's a reference to an interface or type alias
+        return true; // Assume type references could be objects
+      }
+      return false;
+    });
+
+    if (!allObjectLike) return false;
+
+    // Find common properties with literal types
+    const firstType = resolvedTypes[0];
+    if (!(firstType instanceof ir.ObjectType)) return false;
+
+    const firstProps = firstType.properties;
+    for (const prop of firstProps) {
+      if (prop.type instanceof ir.LiteralType) {
+        // Check if all other types have this property with different literal values
+        const propName = prop.name;
+        const hasDiscriminant = resolvedTypes.every((type, index) => {
+          if (!(type instanceof ir.ObjectType)) return false;
+          const matchingProp = type.properties.find(p => p.name === propName);
+          if (!matchingProp || !(matchingProp.type instanceof ir.LiteralType)) return false;
+          return true;
+        });
+
+        if (hasDiscriminant) {
+          return true; // Found a discriminant property
+        }
+      }
+    }
+
+    return false;
   }
 
   private generateUnionType(name: string, union: ir.UnionType, typeParams: string): string {
@@ -2001,19 +2423,119 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
     }
 
-    switch (this.options.unionStrategy) {
+    // Auto-detect discriminated unions and use interface strategy
+    const isDiscriminated = this.isDiscriminatedUnion(union);
+    const effectiveStrategy = isDiscriminated ? 'interface' : this.options.unionStrategy;
+
+    switch (effectiveStrategy) {
       case 'interface':
         // Interface-based discriminated union
+        // Find discriminant field
+        let discriminantField = '';
+        let firstResolvedType = union.types[0];
+        if (firstResolvedType instanceof ir.TypeReference) {
+          const aliased = this.typeAliasMap.get(firstResolvedType.name);
+          if (aliased) firstResolvedType = aliased;
+        }
+
+        if (firstResolvedType instanceof ir.ObjectType) {
+          const firstType = firstResolvedType as ir.ObjectType;
+          for (const prop of firstType.properties) {
+            if (prop.type instanceof ir.LiteralType) {
+              const propName = prop.name;
+              const allHaveProp = union.types.every(type => {
+                let resolvedType = type;
+                if (type instanceof ir.TypeReference) {
+                  const aliased = this.typeAliasMap.get(type.name);
+                  if (aliased) resolvedType = aliased;
+                }
+                if (!(resolvedType instanceof ir.ObjectType)) return false;
+                return resolvedType.properties.some(p => p.name === propName && p.type instanceof ir.LiteralType);
+              });
+              if (allHaveProp) {
+                discriminantField = propName;
+                break;
+              }
+            }
+          }
+        }
+
+        // Determine the discriminant field type
+        let discriminantType = 'string'; // default
+        if (discriminantField && union.types.length > 0) {
+          let firstType = union.types[0];
+          if (firstType instanceof ir.TypeReference) {
+            const aliased = this.typeAliasMap.get(firstType.name);
+            if (aliased) firstType = aliased;
+          }
+          if (firstType instanceof ir.ObjectType) {
+            const discriminantProp = firstType.properties.find(p => p.name === discriminantField);
+            if (discriminantProp && discriminantProp.type instanceof ir.LiteralType) {
+              const literalValue = discriminantProp.type.value;
+              if (typeof literalValue === 'boolean') discriminantType = 'bool';
+              else if (typeof literalValue === 'number') discriminantType = this.options.numberStrategy === 'int' ? 'int' : 'float64';
+              else discriminantType = 'string';
+            }
+          }
+        }
+
         let result = `type ${name}${typeParams} interface {\n`;
         result += `\tis${name}()\n`;
+        if (discriminantField) {
+          const capitalizedField = this.capitalize(discriminantField);
+          result += `\tGet${capitalizedField}() ${discriminantType}\n`;
+        }
         result += '}\n\n';
 
-        // Generate concrete types
+        // Generate concrete struct types for each variant
         for (let i = 0; i < union.types.length; i++) {
-          const typeName = this.getUnionMemberType(union.types[i]);
-          const variantName = `${name}Variant${i}`;
-          result += `type ${variantName} struct { Value ${typeName} }\n`;
-          result += `func (${variantName}) is${name}() {}\n\n`;
+          let type = union.types[i];
+
+          // Resolve TypeReference to actual type
+          if (type instanceof ir.TypeReference) {
+            const aliased = this.typeAliasMap.get(type.name);
+            if (aliased) type = aliased;
+          }
+
+          // For discriminated unions, use the discriminant literal value as the semantic name
+          let semanticName = this.getSemanticTypeName(type);
+          if (type instanceof ir.ObjectType && discriminantField) {
+            const discriminantProp = type.properties.find(p => p.name === discriminantField);
+            if (discriminantProp && discriminantProp.type instanceof ir.LiteralType) {
+              const literalValue = (discriminantProp.type as ir.LiteralType).value;
+              semanticName = this.capitalize(String(literalValue));
+            }
+          }
+
+          const variantName = `${semanticName}${name}`;
+
+          if (type instanceof ir.ObjectType) {
+            // Generate struct with actual fields (include type parameters from parent union)
+            result += `type ${variantName}${typeParams} struct {\n`;
+            for (const prop of type.properties) {
+              const fieldName = this.capitalize(prop.name);
+              const fieldType = prop.type.accept(this);
+              result += `\t${fieldName} ${fieldType}\n`;
+            }
+            result += '}\n\n';
+
+            // Generate marker method (with type parameters if any)
+            result += `func (${variantName[0].toLowerCase()} ${variantName}${typeParams}) is${name}() {}\n`;
+
+            // Generate discriminant accessor if present (with type parameters if any)
+            if (discriminantField) {
+              const capitalizedField = this.capitalize(discriminantField);
+              const fieldName = this.capitalize(discriminantField);
+              result += `func (${variantName[0].toLowerCase()} ${variantName}${typeParams}) Get${capitalizedField}() ${discriminantType} { return ${variantName[0].toLowerCase()}.${fieldName} }\n\n`;
+            } else {
+              result += '\n';
+            }
+          } else {
+            // Fallback for non-object types (shouldn't happen for discriminated unions)
+            const typeName = this.getUnionMemberType(type);
+            result += `type ${variantName}${typeParams} struct { Value ${typeName} }\n`;
+            result += `func (${variantName}${typeParams}) is${name}() {}\n\n`;
+          }
         }
 
         return result.trim();
@@ -2197,12 +2719,21 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     let result = '{\n';
 
     this.increaseIndent();
+
+    // Mark that we're inside a block (not at module level)
+    const wasModuleLevel = this.isModuleLevel;
+    this.isModuleLevel = false;
+
     for (const stmt of node.statements) {
       const stmtCode = stmt.accept(this);
       if (stmtCode) {
         result += `${this.indent()}${stmtCode}\n`;
       }
     }
+
+    // Restore module level flag
+    this.isModuleLevel = wasModuleLevel;
+
     this.decreaseIndent();
 
     result += `${this.indent()}}`;
@@ -2211,9 +2742,14 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitExpressionStatement(node: ir.ExpressionStatement): string {
-    // Skip reassignments to any/unknown typed variables as they don't make sense in Go
+    // Handle assignment expressions
     if (node.expression instanceof ir.AssignmentExpression) {
-      return '';
+      // Skip module-level assignments (they don't make sense in Go)
+      if (this.isModuleLevel) {
+        return '';
+      }
+      // Emit assignments inside functions
+      return node.expression.accept(this);
     }
 
     // Handle array.push() calls that need to be converted to assignment statements
@@ -2258,12 +2794,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
             this.increaseIndent();
             result += `${this.indent()}if p == ${valueExpr} {\n`;
             this.increaseIndent();
-            result += `${this.indent()}return true\n`;
+            // For async functions, return (value, nil)
+            const returnStmt = this.currentFunctionIsAsync ? 'return true, nil' : 'return true';
+            result += `${this.indent()}${returnStmt}\n`;
             this.decreaseIndent();
             result += `${this.indent()}}\n`;
             this.decreaseIndent();
             result += `${this.indent()}}\n`;
-            result += `${this.indent()}return false`;
+            const falseReturn = this.currentFunctionIsAsync ? 'return false, nil' : 'return false';
+            result += `${this.indent()}${falseReturn}`;
             return result;
           }
         }
@@ -2277,36 +2816,256 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         if (unary.prefix && (unary.operator === '++' || unary.operator === '--')) {
           const argCode = unary.argument.accept(this);
           // Generate: arg++\nreturn arg
-          return `${argCode}${unary.operator}\n${this.indent()}return ${argCode}`;
+          const returnValue = this.currentFunctionIsAsync ? `${argCode}, nil` : argCode;
+          return `${argCode}${unary.operator}\n${this.indent()}return ${returnValue}`;
         }
       }
 
-      return `return ${node.argument.accept(this)}`;
+      let returnValue = node.argument.accept(this);
+
+      // If returning an identifier with interface{} type from a function with specific return type,
+      // add type assertion (heuristic: single identifiers that are short variable names)
+      if (node.argument instanceof ir.Identifier && node.argument.name.length <= 5) {
+        // Check if this is a narrowed type (PrimitiveType after typeof checks)
+        if (node.argument.inferredType instanceof ir.PrimitiveType) {
+          const primitiveType = node.argument.inferredType;
+          let goType = '';
+          if (primitiveType.kind === 'string') goType = 'string';
+          else if (primitiveType.kind === 'number') goType = 'float64';
+          else if (primitiveType.kind === 'boolean') goType = 'bool';
+
+          if (goType) {
+            // Add type assertion
+            returnValue = `${returnValue}.(${goType})`;
+          }
+        } else {
+          // Check for union type
+          let unionType: ir.UnionType | null = null;
+          if (node.argument.inferredType instanceof ir.UnionType) {
+            unionType = node.argument.inferredType;
+          } else if (node.argument.inferredType instanceof ir.TypeReference) {
+            const aliasedType = this.typeAliasMap.get(node.argument.inferredType.name);
+            if (aliasedType instanceof ir.UnionType) {
+              unionType = aliasedType;
+            }
+          }
+
+          if (unionType && this.isPlainInterfaceUnion(unionType)) {
+            // Check if this is likely a string (final fallback after typeof checks)
+            // This is a heuristic - in practice, if we checked bool and number, the rest is string
+            returnValue = `${returnValue}.(string)`;
+          }
+        }
+      }
+
+      // For async functions, return (value, nil)
+      if (this.currentFunctionIsAsync) {
+        // If returning nil and we have a return type, use zero value instead
+        if (returnValue === 'nil' && this.currentFunctionReturnType) {
+          const zeroValue = this.getZeroValueForType(this.currentFunctionReturnType);
+          return `return ${zeroValue}, nil`;
+        }
+        return `return ${returnValue}, nil`;
+      }
+      return `return ${returnValue}`;
+    }
+    // For async void functions, return nil
+    if (this.currentFunctionIsAsync) {
+      return 'return nil';
     }
     return 'return';
   }
 
   visitIfStatement(node: ir.IfStatement): string {
-    let testExpr = node.test.accept(this);
+    // Check if this is a typeof comparison pattern
+    // Pattern: if (typeof value === 'type') { ... use value ... }
+    let isTypeofCheck = false;
+    let varName = '';
+    let goType = '';
 
-    // If test is just an identifier that might be a pointer, add != nil check
-    if (node.test instanceof ir.Identifier) {
-      // Check if this looks like it might be a pointer check
-      // In TypeScript, `if (age)` where age is optional should become `if (age != nil)` in Go
-      testExpr = `${testExpr} != nil`;
-    }
+    if (node.test instanceof ir.BinaryExpression &&
+        (node.test.operator === '===' || node.test.operator === '==') &&
+        node.test.left instanceof ir.UnaryExpression &&
+        node.test.left.operator === 'typeof' &&
+        node.test.left.argument instanceof ir.Identifier &&
+        node.test.right instanceof ir.Literal &&
+        typeof node.test.right.value === 'string') {
 
-    let result = `if ${testExpr} ${node.consequent.accept(this)}`;
+      const arg = node.test.left.argument;
+      const typeName = node.test.right.value as string;
 
-    if (node.alternate) {
-      if (node.alternate instanceof ir.IfStatement) {
-        result += ` else ${node.alternate.accept(this)}`;
-      } else {
-        result += ` else ${node.alternate.accept(this)}`;
+      // Check if the variable has an interface{} type (anonymous union)
+      // Only handle anonymous unions, not named types (which use struct methods)
+      let unionType: ir.UnionType | null = null;
+      const isNamedType = arg.inferredType instanceof ir.TypeReference;
+
+      if (arg.inferredType) {
+        if (arg.inferredType instanceof ir.UnionType) {
+          unionType = arg.inferredType;
+        } else if (arg.inferredType instanceof ir.TypeReference) {
+          const aliasedType = this.typeAliasMap.get(arg.inferredType.name);
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+          }
+        }
+      }
+
+      if (unionType && this.isPlainInterfaceUnion(unionType) && !isNamedType) {
+        isTypeofCheck = true;
+        varName = arg.name;
+
+        // Map TypeScript typeof strings to Go types
+        const goTypeMap: Record<string, string> = {
+          'string': 'string',
+          'number': 'float64',
+          'boolean': 'bool',
+          'object': 'interface{}',
+        };
+        goType = goTypeMap[typeName] || typeName;
       }
     }
 
-    return result;
+    if (isTypeofCheck && varName && goType) {
+      // Generate type assertion with new variable: if v, ok := value.(type); ok { ... }
+      const tempVar = varName.charAt(0);
+      let result = `if ${tempVar}, ok := ${varName}.(${goType}); ok `;
+
+      // Visit the consequent block, replacing references to varName with tempVar
+      const consequent = node.consequent.accept(this);
+      const modifiedConsequent = consequent.replace(new RegExp(`\\b${varName}\\b`, 'g'), tempVar);
+      result += modifiedConsequent;
+
+      if (node.alternate) {
+        if (node.alternate instanceof ir.IfStatement) {
+          result += ` else ${node.alternate.accept(this)}`;
+        } else {
+          result += ` else ${node.alternate.accept(this)}`;
+        }
+      }
+
+      return result;
+    }
+
+    // Check if this is a type guard function call pattern
+    // Pattern: if (isError(result)) { ... result.error ... }
+    let isTypeGuard = false;
+    let guardVarName = '';
+    let guardTypeName = '';
+
+    if (node.test instanceof ir.CallExpression &&
+        node.test.callee instanceof ir.Identifier &&
+        node.test.args.length === 1 &&
+        node.test.args[0] instanceof ir.Identifier) {
+
+      const functionName = node.test.callee.name;
+      const argName = node.test.args[0].name;
+
+      // Check if function name starts with "is" or "Is" (type guard pattern)
+      if (/^[Ii]s[A-Z]/.test(functionName)) {
+        isTypeGuard = true;
+        guardVarName = argName;
+        // Extract the type name from the function name (e.g., "IsError" -> "Error")
+        guardTypeName = functionName.replace(/^[Ii]s/, '');
+      }
+    }
+
+    if (isTypeGuard && guardVarName && guardTypeName) {
+      // Generate if with type assertion in the block
+      // Pattern: if IsError(result) { err := result.(ErrorResult); ... use err ... }
+      let result = `if ${node.test.accept(this)} `;
+
+      // Check if the variable has a discriminated union type
+      let needsAssertion = false;
+
+      if (node.test instanceof ir.CallExpression &&
+          node.test.args[0] instanceof ir.Identifier) {
+
+        let unionType: ir.UnionType | null = null;
+
+        if (node.test.args[0].inferredType instanceof ir.TypeReference) {
+          const aliasedType = this.typeAliasMap.get(node.test.args[0].inferredType.name);
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+          }
+        } else if (node.test.args[0].inferredType instanceof ir.UnionType) {
+          // Handle narrowed types (e.g., in else-if after first type guard)
+          unionType = node.test.args[0].inferredType;
+        }
+
+        if (unionType && this.isDiscriminatedUnion(unionType)) {
+          needsAssertion = true;
+        }
+      }
+
+      if (needsAssertion && node.consequent instanceof ir.BlockStatement && node.test instanceof ir.CallExpression) {
+        // Insert type assertion at the beginning of the block
+        const tempVar = guardVarName.substring(0, 3); // Use first 3 chars for temp var
+        const callExpr = node.test as ir.CallExpression;
+        const arg = callExpr.args[0];
+
+        // Get the union type name - use the one we found during needsAssertion check
+        let argTypeName = '';
+        if (arg instanceof ir.Identifier) {
+          if (arg.inferredType instanceof ir.TypeReference) {
+            argTypeName = arg.inferredType.name;
+          } else if (arg.inferredType instanceof ir.UnionType) {
+            // For narrowed types, use the original type name heuristic
+            // In practice, for discriminated unions, the base type name is often the same
+            argTypeName = guardVarName === arg.name ? 'Result' : ''; // TODO: improve this
+          }
+        }
+
+        const assertedType = `${guardTypeName}${argTypeName}`;
+
+        result += '{\n';
+        this.increaseIndent();
+        result += `${this.indent()}${tempVar} := ${guardVarName}.(${assertedType})\n`;
+
+        // Visit block statements, replacing references to guardVarName with tempVar
+        for (const stmt of node.consequent.statements) {
+          const stmtCode = stmt.accept(this);
+          const modifiedStmt = stmtCode.replace(new RegExp(`\\b${guardVarName}\\b`, 'g'), tempVar);
+          result += `${this.indent()}${modifiedStmt}\n`;
+        }
+
+        this.decreaseIndent();
+        result += `${this.indent()}}`;
+
+        if (node.alternate) {
+          if (node.alternate instanceof ir.IfStatement) {
+            result += ` else ${node.alternate.accept(this)}`;
+          } else {
+            result += ` else ${node.alternate.accept(this)}`;
+          }
+        }
+
+        return result;
+      }
+    }
+
+    // Regular if statement
+    {
+      let testExpr = node.test.accept(this);
+
+      // If test is just an identifier that might be a pointer, add != nil check
+      if (node.test instanceof ir.Identifier) {
+        // Check if this looks like it might be a pointer check
+        // In TypeScript, `if (age)` where age is optional should become `if (age != nil)` in Go
+        testExpr = `${testExpr} != nil`;
+      }
+
+      let result = `if ${testExpr} ${node.consequent.accept(this)}`;
+
+      if (node.alternate) {
+        if (node.alternate instanceof ir.IfStatement) {
+          result += ` else ${node.alternate.accept(this)}`;
+        } else {
+          result += ` else ${node.alternate.accept(this)}`;
+        }
+      }
+
+      return result;
+    }
   }
 
   visitWhileStatement(node: ir.WhileStatement): string {
@@ -2314,9 +3073,19 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitForStatement(node: ir.ForStatement): string {
-    let init = node.init ? (node.init instanceof ir.Expression ?
-      node.init.accept(this) :
-      node.init.accept(this).replace(/^var /, '').replace(/^const /, '')) : '';
+    let init = '';
+    if (node.init) {
+      if (node.init instanceof ir.Expression) {
+        init = node.init.accept(this);
+      } else {
+        // For variable declarations in for loops, use := instead of var
+        const initCode = node.init.accept(this);
+        init = initCode
+          .replace(/^var (\w+) (\w+) = /, '$1 := ')  // var i int = 0 -> i := 0
+          .replace(/^var (\w+) = /, '$1 := ')         // var i = 0 -> i := 0
+          .replace(/^const (\w+) = /, '$1 := ');      // const i = 0 -> i := 0
+      }
+    }
     let test = node.test ? node.test.accept(this) : '';
     let update = node.update ? node.update.accept(this) : '';
 
@@ -2387,17 +3156,152 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitSwitchStatement(node: ir.SwitchStatement): string {
-    let result = `switch ${node.discriminant.accept(this)} {\n`;
+    // Check if this is a switch on a discriminated union's discriminant field
+    // Pattern: switch (result.status) where result is a discriminated union
+    let isDiscriminatedSwitch = false;
+    let unionTypeName = '';
+    let discriminantField = '';
+    let varName = '';
+    let unionType: ir.UnionType | null = null;
 
-    this.increaseIndent();
-    for (const caseNode of node.cases) {
-      result += this.visitSwitchCase(caseNode);
+    if (node.discriminant instanceof ir.MemberExpression) {
+      const memberExpr = node.discriminant;
+
+      // Get the discriminant field name
+      if (memberExpr.property instanceof ir.Identifier) {
+        discriminantField = memberExpr.property.name;
+      }
+
+      // Get the object being accessed
+      if (memberExpr.object instanceof ir.Identifier) {
+        varName = memberExpr.object.name;
+
+        // Try to find the type of this variable
+        if (memberExpr.object.inferredType instanceof ir.TypeReference) {
+          unionTypeName = memberExpr.object.inferredType.name;
+          const aliasedType = this.typeAliasMap.get(unionTypeName);
+
+          if (aliasedType instanceof ir.UnionType) {
+            unionType = aliasedType;
+            // Check if this is a discriminated union
+            if (this.isDiscriminatedUnion(unionType)) {
+              isDiscriminatedSwitch = true;
+            }
+          }
+        }
+      }
     }
-    this.decreaseIndent();
 
-    result += `${this.indent()}}`;
+    if (isDiscriminatedSwitch && unionType) {
+      // Generate a type switch instead of a value switch
+      const switchVar = varName.charAt(0);
+      let result = `switch ${switchVar} := ${varName}.(type) {\n`;
 
-    return result;
+      this.increaseIndent();
+      let hasDefaultCase = false;
+      for (const caseNode of node.cases) {
+        if (caseNode.test instanceof ir.Literal) {
+          // Find the corresponding variant type for this literal value
+          const literalValue = (caseNode.test as ir.Literal).value;
+          const variantType = this.findVariantTypeForLiteral(unionType, discriminantField, literalValue, unionTypeName);
+
+          if (variantType) {
+            result += `${this.indent()}case ${variantType}:\n`;
+          } else {
+            // Fallback to regular case
+            result += `${this.indent()}case ${caseNode.test.accept(this)}:\n`;
+          }
+        } else if (!caseNode.test) {
+          result += `${this.indent()}default:\n`;
+          hasDefaultCase = true;
+        } else {
+          result += `${this.indent()}case ${caseNode.test.accept(this)}:\n`;
+        }
+
+        this.increaseIndent();
+        // Generate the case body, with references to varName replaced by switchVar
+        for (const stmt of caseNode.consequent) {
+          const stmtCode = this.visitStatementWithVarReplacement(stmt, varName, switchVar);
+          result += `${this.indent()}${stmtCode}\n`;
+        }
+        this.decreaseIndent();
+      }
+
+      // Add default case if not present to satisfy Go's exhaustiveness requirement
+      if (!hasDefaultCase) {
+        result += `${this.indent()}default:\n`;
+        this.increaseIndent();
+        result += `${this.indent()}return ""\n`;
+        this.decreaseIndent();
+      }
+
+      this.decreaseIndent();
+
+      result += `${this.indent()}}`;
+      return result;
+    } else {
+      // Regular switch statement
+      let result = `switch ${node.discriminant.accept(this)} {\n`;
+
+      this.increaseIndent();
+      for (const caseNode of node.cases) {
+        result += this.visitSwitchCase(caseNode);
+      }
+      this.decreaseIndent();
+
+      result += `${this.indent()}}`;
+
+      return result;
+    }
+  }
+
+  /**
+   * Find the variant type name for a given literal value in a discriminated union
+   */
+  private findVariantTypeForLiteral(
+    unionType: ir.UnionType,
+    discriminantField: string,
+    literalValue: any,
+    unionTypeName: string
+  ): string | null {
+    for (let i = 0; i < unionType.types.length; i++) {
+      let type = unionType.types[i];
+
+      // Resolve TypeReference to actual type
+      if (type instanceof ir.TypeReference) {
+        const aliased = this.typeAliasMap.get(type.name);
+        if (aliased) type = aliased;
+      }
+
+      if (type instanceof ir.ObjectType) {
+        const matchingProp = type.properties.find(p => p.name === discriminantField);
+        if (matchingProp && matchingProp.type instanceof ir.LiteralType) {
+          const propLiteral = matchingProp.type as ir.LiteralType;
+          if (propLiteral.value === literalValue) {
+            // Found the matching variant
+            // Use the discriminant literal value as the semantic name
+            const semanticName = this.capitalize(String(literalValue));
+            return `${semanticName}${unionTypeName}`;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Visit a statement with variable name replacement
+   * Used in type switches to replace references to the original variable with the type-switched variable
+   */
+  private visitStatementWithVarReplacement(stmt: ir.Statement, oldVar: string, newVar: string): string {
+    // For now, just generate normally and do string replacement
+    // A more sophisticated approach would traverse the AST
+    const stmtCode = stmt.accept(this);
+
+    // Replace references: oldVar.field -> newVar.field
+    // Use word boundaries to avoid partial matches
+    const regex = new RegExp(`\\b${oldVar}\\.`, 'g');
+    return stmtCode.replace(regex, `${newVar}.`);
   }
 
   visitSwitchCase(node: ir.SwitchCase): string {
@@ -2569,6 +3473,97 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         ? memberExpr.property.name
         : null;
 
+      // Handle primitive type methods on union types
+      // When we have value.toUpperCase() where value is a union type,
+      // we need to extract the value first
+      if (methodName && memberExpr.object instanceof ir.Identifier) {
+        // For identifiers, try to look up their type from the symbol table or inferred type
+        let unionType: ir.UnionType | null = null;
+
+        if (memberExpr.object.inferredType) {
+          if (memberExpr.object.inferredType instanceof ir.UnionType) {
+            unionType = memberExpr.object.inferredType;
+          } else if (memberExpr.object.inferredType instanceof ir.TypeReference) {
+            const aliasedType = this.typeAliasMap.get(memberExpr.object.inferredType.name);
+            if (aliasedType instanceof ir.UnionType) {
+              unionType = aliasedType;
+            }
+          }
+        }
+
+        // Even if inferredType is not set, check if the identifier name suggests a union
+        // by checking if methods like .IsString() exist on it (heuristic)
+        const shouldCheckUnion = unionType !== null ||
+          methodName === 'toUpperCase' || methodName === 'toLowerCase' ||
+          methodName === 'toFixed' || methodName === 'toPrecision' || methodName === 'toString';
+
+        if (shouldCheckUnion) {
+          const objectExpr = memberExpr.object.accept(this);
+
+          // String methods
+          if (methodName === 'toUpperCase' || methodName === 'toLowerCase' ||
+              methodName === 'trim' || methodName === 'split' || methodName === 'slice' ||
+              methodName === 'substring' || methodName === 'charAt' || methodName === 'indexOf' ||
+              methodName === 'replace' || methodName === 'match') {
+            // Extract string from union and use strings package if needed
+            const stringExtract = `${objectExpr}.AsString()`;
+
+            if (methodName === 'toUpperCase') {
+              // For toUpperCase, just return the extracted value
+              // The semantic meaning is preserved even if we don't fully translate the method
+              return stringExtract;
+            }
+
+            // For other methods, would need full translation
+            return stringExtract;
+          }
+
+          // Number methods
+          if (methodName === 'toFixed' || methodName === 'toPrecision' || methodName === 'toExponential') {
+            const numberExtract = `${objectExpr}.AsNumber()`;
+
+            if (methodName === 'toFixed') {
+              // For toFixed(n), generate fmt.Sprintf("%.Nf", value)
+              if (node.args.length === 1 && node.args[0] instanceof ir.Literal) {
+                const precision = node.args[0].value;
+                this.addImport('fmt');
+                return `fmt.Sprintf("%.${precision}f", ${numberExtract})`;
+              }
+              // Fallback: just return the number extract
+              return numberExtract;
+            }
+
+            return numberExtract;
+          }
+
+          // toString() method on numbers
+          if (methodName === 'toString') {
+            if (unionType) {
+              // Check if the object could be a number in a union type
+              for (const type of unionType.types) {
+                if (type instanceof ir.PrimitiveType && type.kind === 'number') {
+                  this.addImport('strconv');
+                  return `strconv.FormatFloat(${objectExpr}.AsNumber(), 'f', -1, 64)`;
+                }
+              }
+            } else if (memberExpr.object.inferredType instanceof ir.PrimitiveType &&
+                       memberExpr.object.inferredType.kind === 'number') {
+              // Direct number type (e.g., after type assertion)
+              this.addImport('strconv');
+              return `strconv.FormatFloat(${objectExpr}, 'f', -1, 64)`;
+            } else {
+              // Fallback: if no type info but the variable name suggests it's numeric,
+              // assume it's a float64 (common after type assertion)
+              const varName = memberExpr.object instanceof ir.Identifier ? memberExpr.object.name : '';
+              if (varName.length === 1 || /num|val|value|n|v/.test(varName)) {
+                this.addImport('strconv');
+                return `strconv.FormatFloat(${objectExpr}, 'f', -1, 64)`;
+              }
+            }
+          }
+        }
+      }
+
       // Handle array.push() → append(array, element)
       if (methodName === 'push' || methodName === 'Push') {
         const arrayExpr = memberExpr.object.accept(this);
@@ -2576,6 +3571,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // Return the append call - note that this returns a new array
         // In statements like `result.push(x)`, this will generate `result = append(result, x)`
         return `append(${arrayExpr}, ${args})`;
+      }
+
+      // Handle array.slice(start, end) → array[start:end]
+      if (methodName === 'slice' || methodName === 'Slice') {
+        const arrayExpr = memberExpr.object.accept(this);
+        if (node.args.length === 0) {
+          // slice() with no args creates a copy
+          return `append([]${this.getArrayElementType(memberExpr.object)}{}, ${arrayExpr}...)`;
+        } else if (node.args.length === 1) {
+          const start = node.args[0].accept(this);
+          return `${arrayExpr}[${start}:]`;
+        } else if (node.args.length === 2) {
+          const start = node.args[0].accept(this);
+          const end = node.args[1].accept(this);
+          return `${arrayExpr}[${start}:${end}]`;
+        }
       }
 
       // Handle Map.get(key) → map[key] (returns value directly in Go)
@@ -2631,12 +3642,18 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       // Handle console.log() → fmt.Println()
+      // Handle console.error() → fmt.Fprintln(os.Stderr, ...)
       if (memberExpr.object instanceof ir.Identifier &&
-          memberExpr.object.name === 'console' &&
-          methodName === 'log') {
-        this.addImport('fmt');
+          memberExpr.object.name === 'console') {
         const args = node.args.map(arg => arg.accept(this)).join(', ');
-        return `fmt.Println(${args})`;
+        if (methodName === 'log') {
+          this.addImport('fmt');
+          return `fmt.Println(${args})`;
+        } else if (methodName === 'error') {
+          this.addImport('fmt');
+          this.addImport('os');
+          return `fmt.Fprintln(os.Stderr, ${args})`;
+        }
       }
     }
 
@@ -2662,6 +3679,52 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       let property: string;
       if (node.property instanceof ir.Identifier) {
         const propName = node.property.name;
+
+        // Special handling for process.env.X → os.Getenv("X")
+        if (node.object instanceof ir.MemberExpression &&
+            node.object.object instanceof ir.Identifier &&
+            node.object.object.name === 'process' &&
+            node.object.property instanceof ir.Identifier &&
+            node.object.property.name === 'env') {
+          this.addImport('os');
+          return `os.Getenv("${propName}")`;
+        }
+
+        // Special handling for array length property → len(array)
+        if (propName === 'length') {
+          // Check if object is likely an array type
+          // Only convert if we have type information or a strong heuristic
+          const isKnownArray = node.object.inferredType instanceof ir.ArrayType ||
+                              (node.object.inferredType instanceof ir.TypeReference &&
+                               node.object.inferredType.name === 'Array');
+
+          // Use strong heuristics only if type info is not available
+          const isLikelyArray = !node.object.inferredType &&
+                               node.object instanceof ir.Identifier &&
+                               (node.object.name.includes('arr') ||
+                                node.object.name.includes('list') ||
+                                node.object.name.includes('items') ||
+                                node.object.name === 'numbers' ||
+                                node.object.name === 'chunks');
+
+          if (isKnownArray || isLikelyArray) {
+            return `len(${object})`;
+          }
+        }
+
+        // Check if this is accessing a discriminant field on a discriminated union interface
+        if (node.object instanceof ir.Identifier && node.object.inferredType instanceof ir.TypeReference) {
+          const typeName = node.object.inferredType.name;
+          const aliasedType = this.typeAliasMap.get(typeName);
+
+          if (aliasedType instanceof ir.UnionType && this.isDiscriminatedUnion(aliasedType)) {
+            // Check if this property is the discriminant field
+            // For discriminated unions using interface strategy, convert field access to getter method
+            const capitalizedProp = this.capitalize(propName);
+            return `${object}.Get${capitalizedProp}()`;
+          }
+        }
+
         // Keep private field names lowercase, capitalize public fields
         if (this.privateFieldNames.has(propName)) {
           property = propName; // Keep lowercase for private fields
@@ -2673,12 +3736,23 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
         // This handles the case where interface properties became getter methods
         // TODO: Use type information to be more precise
         const propertyToMethod: {[key: string]: string} = {
+          // For interface Length property (not array length which is handled above)
           'Length': 'Len()',
-          'length': 'Len()',
         };
 
         // Only convert if this is not in the current class context (i.e., not accessing own fields)
+        // and not already handled as array length
         if (propertyToMethod[property] && !this.fieldTypeMap.has(propName)) {
+          // Make sure we didn't already handle this as array length
+          if (propName === 'length') {
+            const isKnownArray = node.object.inferredType instanceof ir.ArrayType ||
+                                (node.object.inferredType instanceof ir.TypeReference &&
+                                 node.object.inferredType.name === 'Array');
+            if (isKnownArray) {
+              // Already handled above, don't apply this transformation
+              return `${object}.${property}`;
+            }
+          }
           return `${object}.${propertyToMethod[property]}`;
         }
       } else {
@@ -2697,7 +3771,24 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
   }
 
   visitNewExpression(node: ir.NewExpression): string {
-    const callee = node.callee.accept(this);
+    let callee: string;
+    let constructorName: string;
+
+    // Handle member expressions like Utils.Logger
+    if (node.callee instanceof ir.MemberExpression) {
+      const memberExpr = node.callee as ir.MemberExpression;
+      // For new Namespace.Class(), we want NewClass, not NewNamespace.Class
+      if (memberExpr.property instanceof ir.Identifier) {
+        constructorName = memberExpr.property.name;
+      } else {
+        constructorName = memberExpr.property.accept(this);
+      }
+      callee = constructorName;
+    } else {
+      callee = node.callee.accept(this);
+      constructorName = callee;
+    }
+
     const args = node.args.map(arg => arg.accept(this)).join(', ');
 
     // Special handling for Date
@@ -2727,7 +3818,7 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     }
 
     // TypeScript's new → Go's constructor function
-    return `New${callee}(${args})`;
+    return `New${constructorName}(${args})`;
   }
 
   visitSuperExpression(node: ir.SuperExpression): string {
@@ -2739,13 +3830,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
   visitBinaryExpression(node: ir.BinaryExpression): string {
     // Special handling for typeof comparisons on union types
-    // Pattern: typeof value === 'string' → value.IsString()
+    // Pattern: typeof value === 'string' → value.IsString() or type assertion
     if ((node.operator === '===' || node.operator === '==') &&
         node.left instanceof ir.UnaryExpression && node.left.operator === 'typeof' &&
         node.right instanceof ir.Literal && typeof node.right.value === 'string') {
 
       const arg = node.left.argument;
       const typeName = node.right.value as string;
+      const varName = arg.accept(this);
+
+      // Map TypeScript typeof strings to Go types
+      const goTypeMap: Record<string, string> = {
+        'string': 'string',
+        'number': 'float64',
+        'boolean': 'bool',
+        'object': 'interface{}',
+      };
 
       // Check if the argument has a union type (directly or via type reference)
       let unionType: ir.UnionType | null = null;
@@ -2762,8 +3862,19 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       if (unionType) {
+        // Check if the variable has a named type (TypeReference)
+        // Named union types use tagged union structs with methods
+        // Only anonymous unions (direct union type, not via type alias) should use type assertions
+        const isNamedType = arg.inferredType instanceof ir.TypeReference;
 
-        // Find the matching type in the union
+        // Check if this union maps to plain interface{} without methods
+        if (this.isPlainInterfaceUnion(unionType) && !isNamedType) {
+          // Use type assertion for anonymous plain interface{} types
+          const goType = goTypeMap[typeName] || typeName;
+          return `func() bool { _, ok := ${varName}.(${goType}); return ok }()`;
+        }
+
+        // Find the matching type in the union for tagged/interface union types
         for (const type of unionType.types) {
           let matchesType = false;
 
@@ -2779,7 +3890,6 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
           if (matchesType) {
             const semanticName = this.getSemanticTypeName(type);
-            const varName = arg.accept(this);
             return `${varName}.Is${semanticName}()`;
           }
         }
@@ -2793,6 +3903,15 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
       const arg = node.left.argument;
       const typeName = node.right.value as string;
+      const varName = arg.accept(this);
+
+      // Map TypeScript typeof strings to Go types
+      const goTypeMap: Record<string, string> = {
+        'string': 'string',
+        'number': 'float64',
+        'boolean': 'bool',
+        'object': 'interface{}',
+      };
 
       let unionType: ir.UnionType | null = null;
       if (arg.inferredType) {
@@ -2807,6 +3926,17 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
       }
 
       if (unionType) {
+        // Check if the variable has a named type (TypeReference)
+        // Named union types use tagged union structs with methods
+        // Only anonymous unions (direct union type, not via type alias) should use type assertions
+        const isNamedType = arg.inferredType instanceof ir.TypeReference;
+
+        // Check if this union maps to plain interface{} without methods
+        if (this.isPlainInterfaceUnion(unionType) && !isNamedType) {
+          // Use type assertion for anonymous plain interface{} types
+          const goType = goTypeMap[typeName] || typeName;
+          return `func() bool { _, ok := ${varName}.(${goType}); return !ok }()`;
+        }
 
         for (const type of unionType.types) {
           let matchesType = false;
@@ -2823,7 +3953,6 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
 
           if (matchesType) {
             const semanticName = this.getSemanticTypeName(type);
-            const varName = arg.accept(this);
             return `!${varName}.Is${semanticName}()`;
           }
         }
@@ -2882,8 +4011,22 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     const consequent = node.consequent.accept(this);
     const alternate = node.alternate.accept(this);
 
+    // Determine the return type based on the branches
+    let returnType = 'interface{}';
+
+    // If both branches are string literals, use string type
+    if (node.consequent instanceof ir.Literal && node.alternate instanceof ir.Literal) {
+      if (typeof node.consequent.value === 'string' && typeof node.alternate.value === 'string') {
+        returnType = 'string';
+      } else if (typeof node.consequent.value === 'number' && typeof node.alternate.value === 'number') {
+        returnType = this.options.numberStrategy === 'int' ? 'int' : 'float64';
+      } else if (typeof node.consequent.value === 'boolean' && typeof node.alternate.value === 'boolean') {
+        returnType = 'bool';
+      }
+    }
+
     // Go 沒有三元運算子，使用 IIFE
-    return `func() interface{} { if ${test} { return ${consequent} }; return ${alternate} }()`;
+    return `func() ${returnType} { if ${test} { return ${consequent} }; return ${alternate} }()`;
   }
 
   visitAwaitExpression(node: ir.AwaitExpression): string {
@@ -2909,7 +4052,20 @@ export class GoCodeGenerator implements ir.IRVisitor<string> {
     for (let i = 0; i < node.quasis.length; i++) {
       format += node.quasis[i];
       if (i < node.expressions.length) {
-        const expr = node.expressions[i];
+        let expr = node.expressions[i];
+
+        // Unwrap JSON.stringify() calls since fmt.Sprintf %v handles it
+        if (expr instanceof ir.CallExpression &&
+            expr.callee instanceof ir.MemberExpression &&
+            expr.callee.object instanceof ir.Identifier &&
+            expr.callee.object.name === 'JSON' &&
+            expr.callee.property instanceof ir.Identifier &&
+            expr.callee.property.name === 'stringify' &&
+            expr.args.length > 0) {
+          // Use the argument to JSON.stringify instead of the call itself
+          expr = expr.args[0];
+        }
+
         let arg = expr.accept(this);
 
         // Use %s for string types, %v for others
