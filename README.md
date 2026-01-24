@@ -1,105 +1,108 @@
 # TS2Go - TypeScript to Go Transpiler
 
-一個強調**語義保真**的 TypeScript 到 Go 轉譯器，致力於產生可讀、慣用且類型安全的 Go 程式碼。
+A TypeScript-to-Go transpiler that emphasizes **semantic preservation**, generating readable, idiomatic, and type-safe Go code.
 
-## 專案特色
+## Features
 
-- **語義保真優先**：確保轉譯後的 Go 程式碼語義與原始 TypeScript 一致
-- **完整型別系統**：支援泛型、Union/Intersection、Mapped Types 等進階型別特性
-- **可配置策略**：提供多種型別對映與語義轉換策略
-- **清晰的錯誤訊息**：精確定位到原始 TypeScript 檔案的行列號
-- **慣用的 Go 程式碼**：產生符合 Go 社群最佳實踐的程式碼
+- **Semantic Preservation**: Ensures transpiled Go code maintains the same semantics as the original TypeScript
+- **Complete Type System**: Supports generics, Union/Intersection types, Mapped Types, and other advanced type features
+- **Configurable Strategies**: Multiple type mapping and semantic transformation strategies
+- **Clear Error Messages**: Precise error location tracking to original TypeScript source
+- **Idiomatic Go Output**: Generates code following Go community best practices
 
-## 架構設計
+## Architecture
 
-### 三階段編譯流程
+### Three-Stage Compilation Pipeline
 
 ```
-TypeScript → IR (中間表示) → Go
-    ↓           ↓              ↓
-  前端        中端           後端
+TypeScript → IR (Intermediate Representation) → Go
+    ↓              ↓                              ↓
+  Frontend       Middle-end                    Backend
 ```
 
-1. **前端**：使用 TypeScript Compiler API 建立 AST 與型別資訊
-2. **中端**：正規化控制流程、型別抹平、語義降階
-3. **後端**：使用 `go/ast` + `go/printer` 產生 Go 程式碼
+1. **Frontend**: Uses TypeScript Compiler API to build AST and type information
+2. **Middle-end**: Control flow normalization, type flattening, semantic lowering
+3. **Backend**: Generates Go code using visitor pattern
 
-### 目錄結構
+### Directory Structure
 
 ```
 ts2go-mono-repo/
 ├── src/
-│   ├── compiler/      # 主編譯器介面
-│   ├── ir/           # 中間表示 (IR) 定義
-│   │   ├── nodes.ts      # IR 節點定義
-│   │   ├── location.ts   # 源碼位置追蹤
-│   │   └── transformer.ts # TypeScript AST → IR 轉換
-│   ├── frontend/     # TypeScript 解析器
-│   │   └── parser.ts     # TypeScript Compiler API 封裝
-│   ├── backend/      # Go 程式碼產生器
-│   ├── runtime/      # 執行時輔助函式
-│   ├── utils/        # 工具函式
-│   └── config/       # 配置選項
-│       └── options.ts    # 編譯器配置
+│   ├── compiler/      # Main compiler interface
+│   ├── ir/            # Intermediate Representation (IR) definitions
+│   │   ├── nodes.ts       # IR node definitions
+│   │   ├── location.ts    # Source location tracking
+│   │   └── transformer.ts # TypeScript AST → IR transformation
+│   ├── frontend/      # TypeScript parser
+│   │   └── parser.ts      # TypeScript Compiler API wrapper
+│   ├── backend/       # Go code generator
+│   │   ├── go-generator.ts # IR → Go code generation
+│   │   ├── type-mapper.ts  # Type mapping strategies
+│   │   └── sourcemap.ts    # Source map generation
+│   ├── runtime/       # Runtime helper functions
+│   ├── optimizer/     # Optimization passes
+│   └── config/        # Configuration options
+│       └── options.ts     # Compiler configuration
 ├── tests/
-│   ├── golden/       # 黃金測試樣例
-│   │   ├── *.ts          # TypeScript 輸入
-│   │   └── expected/*.go # 預期 Go 輸出
-│   ├── unit/         # 單元測試
-│   └── e2e/          # 端到端測試
-└── examples/         # 範例程式碼
+│   ├── golden/        # Golden test cases
+│   │   ├── *.ts           # TypeScript input
+│   │   └── expected/*.go  # Expected Go output
+│   ├── unit/          # Unit tests
+│   └── e2e/           # End-to-end tests
+└── examples/          # Example code
 ```
 
-## 核心 IR 型別系統
+## Core IR Type System
 
-### 型別節點
+### Type Nodes
 - **PrimitiveType**: `number`, `string`, `boolean`, `void`, `any`, `unknown`, `never`
-- **ArrayType**: 陣列型別
-- **TupleType**: 元組型別
-- **ObjectType**: 物件字面量型別
-- **FunctionType**: 函式型別
-- **UnionType**: 聯合型別 `A | B`
-- **IntersectionType**: 交叉型別 `A & B`
-- **TypeReference**: 型別引用（含泛型參數）
-- **LiteralType**: 字面量型別
+- **ArrayType**: Array types
+- **TupleType**: Tuple types
+- **ObjectType**: Object literal types
+- **FunctionType**: Function types
+- **UnionType**: Union types `A | B`
+- **IntersectionType**: Intersection types `A & B`
+- **TypeReference**: Type references (including generic parameters)
+- **LiteralType**: Literal types
 
-### 宣告節點
-- **VariableDeclaration**: 變數宣告
-- **FunctionDeclaration**: 函式宣告
-- **ClassDeclaration**: 類別宣告
-- **InterfaceDeclaration**: 介面宣告
-- **TypeAliasDeclaration**: 型別別名
-- **EnumDeclaration**: 列舉宣告
+### Declaration Nodes
+- **VariableDeclaration**: Variable declarations
+- **FunctionDeclaration**: Function declarations
+- **ClassDeclaration**: Class declarations
+- **InterfaceDeclaration**: Interface declarations
+- **TypeAliasDeclaration**: Type aliases
+- **EnumDeclaration**: Enum declarations
 
-### 表達式節點
-- **BinaryExpression**: 二元運算
-- **UnaryExpression**: 一元運算
-- **CallExpression**: 函式呼叫
-- **MemberExpression**: 成員存取
+### Expression Nodes
+- **BinaryExpression**: Binary operations
+- **UnaryExpression**: Unary operations
+- **CallExpression**: Function calls
+- **MemberExpression**: Member access
 - **AwaitExpression**: async/await
-- **ConditionalExpression**: 三元運算
-- **TemplateLiteral**: 模板字串
+- **ConditionalExpression**: Ternary operations
+- **TemplateLiteral**: Template strings
 
-## 型別對映策略
+## Type Mapping Strategies
 
-### 基本型別
+### Basic Types
 
-| TypeScript | Go (預設) | 可選策略 |
-|-----------|----------|---------|
+| TypeScript | Go (Default) | Alternative Strategies |
+|-----------|--------------|------------------------|
 | `number` | `float64` | `int`, `contextual` |
 | `string` | `string` | - |
 | `boolean` | `bool` | - |
 | `any` | `interface{}` | - |
-| `unknown` | `interface{}` + 型別檢查 | - |
-| `void` | 無返回值 | - |
+| `unknown` | `interface{}` + type checks | - |
+| `void` | no return value | - |
 | `Array<T>` | `[]T` | - |
 | `Tuple<A,B>` | `struct{Item0 A; Item1 B}` | - |
 
-### 進階型別
+### Advanced Types
 
 #### Union Types (`A | B`)
 
-**策略 1: Tagged Union** (預設)
+**Strategy 1: Tagged Union** (default)
 ```go
 type StringOrNumber struct {
     tag    int
@@ -108,14 +111,14 @@ type StringOrNumber struct {
 }
 ```
 
-**策略 2: Interface**
+**Strategy 2: Interface**
 ```go
 type StringOrNumber interface {
     isStringOrNumber()
 }
 ```
 
-**策略 3: Any**
+**Strategy 3: Any**
 ```go
 type StringOrNumber interface{}
 ```
@@ -124,23 +127,23 @@ type StringOrNumber interface{}
 
 ```go
 type Person struct {
-    Named    // 內嵌
-    Aged     // 內嵌
-    Located  // 內嵌
+    Named    // embedded
+    Aged     // embedded
+    Located  // embedded
 }
 ```
 
 #### Optional Types (`T?`)
 
 ```go
-// 使用指標
+// Using pointers
 var email *string
 
-// 或使用 sql.Null* 系列
+// Or using sql.Null* series
 var email sql.NullString
 ```
 
-### 語義對映
+### Semantic Mappings
 
 #### Async/Await → Error Return
 
@@ -209,9 +212,9 @@ func (c *Counter) Increment() int {
 }
 ```
 
-## 配置選項
+## Configuration Options
 
-在 `ts2go.json` 中配置轉譯策略：
+Configure transpilation strategies in `ts2go.json`:
 
 ```json
 {
@@ -226,7 +229,7 @@ func (c *Counter) Increment() int {
 }
 ```
 
-### 可用選項
+### Available Options
 
 - **numberStrategy**: `float64` | `int` | `contextual`
 - **unionStrategy**: `tagged` | `interface` | `any`
@@ -234,141 +237,151 @@ func (c *Counter) Increment() int {
 - **asyncStrategy**: `sync` | `future` | `errgroup`
 - **errorHandling**: `return` | `panic`
 
-## 黃金測試樣例
+## Golden Test Cases
 
-專案包含 10 個涵蓋核心功能的黃金測試：
+The project includes 10 golden tests covering core features:
 
-1. **01-basic-types**: 基本型別、陣列、元組、可選參數
-2. **02-interfaces-classes**: 介面、類別、繼承、靜態成員
-3. **03-generics**: 泛型函式、類別、約束、多型別參數
-4. **04-union-intersection**: Union/Intersection 型別、型別守衛
-5. **05-async-await**: Promise、async/await、並行執行
-6. **06-error-handling**: 錯誤處理、自訂錯誤、Result 模式
-7. **07-enums-namespaces**: Enum、Namespace、模組合併
-8. **08-arrays-iterators**: 陣列操作、迭代器、高階函式
-9. **09-modules-imports**: 模組系統、import/export
-10. **10-advanced-types**: Mapped types、Type guards、條件型別
+| Test | Description | Status |
+|------|-------------|--------|
+| 01-basic-types | Basic types, arrays, tuples, optional parameters | ✅ Passing |
+| 02-interfaces-classes | Interfaces, classes, inheritance, static members | ✅ Passing |
+| 03-generics | Generic functions, classes, constraints, multi-type parameters | ✅ Passing |
+| 04-union-intersection | Union/Intersection types, type guards | 🚧 In Progress |
+| 05-async-await | Promise, async/await, concurrent execution | 🚧 In Progress |
+| 06-error-handling | Error handling, custom errors, Result pattern | 🚧 In Progress |
+| 07-enums-namespaces | Enum, Namespace, module merging | 🚧 In Progress |
+| 08-arrays-iterators | Array operations, iterators, higher-order functions | 🚧 In Progress |
+| 09-modules-imports | Module system, import/export | 🚧 In Progress |
+| 10-advanced-types | Mapped types, Type guards, conditional types | 🚧 In Progress |
 
-每個測試樣例都包含：
-- TypeScript 輸入檔案 (`tests/golden/*.ts`)
-- 預期 Go 輸出檔案 (`tests/golden/expected/*.go`)
+Each test case includes:
+- TypeScript input file (`tests/golden/*.ts`)
+- Expected Go output file (`tests/golden/expected/*.go`)
 
-## 安裝與使用
+## Installation & Usage
 
-### 安裝依賴
+### Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 建構專案
+### Build Project
 
 ```bash
 npm run build
 ```
 
-### 執行測試
+### Run Tests
 
 ```bash
-# 所有測試
+# All tests
 npm test
 
-# 黃金測試
+# Golden tests only
 npm run test:golden
 
-# 單元測試
+# Unit tests
 npm run test:unit
 ```
 
-### 使用 CLI
+### CLI Usage
 
 ```bash
-# 轉譯單一檔案
+# Transpile a single file
 ts2go input.ts -o output.go
 
-# 轉譯整個專案
+# Transpile entire project
 ts2go src/ -o dist/
 
-# 指定配置檔
+# Specify configuration file
 ts2go src/ -c ts2go.json
 ```
 
-## 開發路線圖
+## Development Roadmap
 
-### ✅ 已完成
-- [x] 專案骨架與 IR 型別定義
-- [x] TypeScript Parser 實作
-- [x] IR 轉換器核心框架
-- [x] 10 個黃金測試樣例設計
-- [x] Go 程式碼產生器完整實作
-- [x] 型別對映策略系統 (TypeMapper)
-- [x] Source Map 產生
-- [x] 測試框架建置 (Jest + Golden Tests)
-- [x] 差分測試工具 (Differential Testing)
-- [x] CLI 工具完整實作
-- [x] Runtime 輔助函式庫 (Optional, Union, Future, Array helpers)
-- [x] 優化系統 (Dead Code Elimination, Constant Folding 等)
-- [x] Union/Intersection 基礎支援
-- [x] Watch 模式
+### ✅ Completed
+- [x] Project skeleton and IR type definitions
+- [x] TypeScript Parser implementation
+- [x] IR transformer core framework
+- [x] 10 golden test case designs
+- [x] Go code generator complete implementation
+- [x] Type mapping strategy system (TypeMapper)
+- [x] Source Map generation
+- [x] Test framework setup (Jest + Golden Tests)
+- [x] Differential testing tool
+- [x] CLI tool complete implementation
+- [x] Runtime helper library (Optional, Union, Future, Array helpers)
+- [x] Optimization system (Dead Code Elimination, Constant Folding, etc.)
+- [x] Basic types, interfaces, classes support (Tests 01-03)
+- [x] Generics with constraints and type parameter propagation
+- [x] Watch mode
+- [x] Array method transformations (.map, .filter, .reduce)
+- [x] Type predicate and type guard support
+- [x] Discriminated union detection and handling
 
-### 🚧 進行中
-- [ ] 完整的 Mapped/Conditional Types 處理
-- [ ] 更精確的型別推斷
-- [ ] 模組相依性完整解析
+### 🚧 In Progress
+- [ ] Union/Intersection complete implementation (Test 04)
+- [ ] Async/await semantic mapping (Test 05)
+- [ ] Error handling patterns (Test 06)
+- [ ] Enum and namespace handling (Test 07)
+- [ ] Iterator and higher-order function support (Test 08)
+- [ ] Module dependency resolution (Test 09)
+- [ ] Mapped/Conditional types processing (Test 10)
 
-### 📋 計劃中
-- [ ] 效能優化與基準測試
-- [ ] 增量編譯支援
-- [ ] 更多語言特性支援 (Decorators, Reflection)
-- [ ] 生產環境穩定性提升
-- [ ] 文件與範例完善
+### 📋 Planned
+- [ ] Performance optimization and benchmarking
+- [ ] Incremental compilation support
+- [ ] Additional language features (Decorators, Reflection)
+- [ ] Production stability improvements
+- [ ] Documentation and examples
 
-## 語義陷阱清單
+## Semantic Traps
 
-在開發過程中需要特別注意的語義差異：
+Important semantic differences to be aware of when working with this transpiler:
 
-1. **結構型 vs 名稱型**：TS 是結構型，Go 介面具名 + method set
-2. **例外語義**：TS 任何東西都能 `throw`；Go 嚴格 `error`
-3. **浮點與整數**：`number` 混用可能引入 truncation
-4. **可選屬性**：Go 零值不等於「缺席」，多用指標或 `ok` pair
-5. **this 綁定**：class method 與自由函式的 `this` 差異
-6. **模組副作用**：ESM 順序與副作用初始化
-7. **位元操作**：TS number 是 64-bit float；位運算以 32-bit 整數語義進行
+1. **Structural vs Nominal**: TypeScript uses structural typing; Go interfaces are nominal with method sets
+2. **Exception Semantics**: TypeScript can throw anything; Go uses strict `error` values
+3. **Float and Integer**: `number` mixing may introduce truncation
+4. **Optional Properties**: Go zero values ≠ "absent"; use pointers or `ok` pairs
+5. **this Binding**: Difference between class methods and free functions' `this`
+6. **Module Side Effects**: ESM order and side effect initialization
+7. **Bitwise Operations**: TS number is 64-bit float; bitwise ops use 32-bit integer semantics
 
-## 貢獻指南
+## Contributing
 
-歡迎貢獻！請遵循以下步驟：
+Contributions are welcome! Please follow these steps:
 
-1. Fork 本專案
-2. 建立 feature 分支 (`git checkout -b feature/amazing-feature`)
-3. 提交變更 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 開啟 Pull Request
+1. Fork this project
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-### 程式碼風格
+### Code Style
 
-- 使用 TypeScript strict 模式
-- 遵循 ESLint 規則
-- 為新功能添加測試
-- 更新相關文件
+- Use TypeScript strict mode
+- Follow ESLint rules
+- Add tests for new features
+- Update relevant documentation
 
-## 授權
+## License
 
-GPL License - 詳見 [LICENSE](LICENSE) 檔案
+GPL-2.0 License - See [LICENSE](LICENSE) file for details
 
-## 致謝
+## Acknowledgments
 
-本專案靈感來自於對更好的跨語言轉譯工具的需求，特別感謝：
+This project is inspired by the need for better cross-language transpilation tools. Special thanks to:
 
-- TypeScript Compiler API 的優秀設計
-- Go 語言的簡潔與高效
-- 所有開源編譯器專案的先驅者們
+- TypeScript Compiler API's excellent design
+- Go language's simplicity and efficiency
+- All pioneers of open source compiler projects
 
-## 聯絡方式
+## Contact
 
 - Issues: [GitHub Issues](https://github.com/rainboltz/ts2go/issues)
 - Discussions: [GitHub Discussions](https://github.com/rainboltz/ts2go/discussions)
 
 ---
 
-**⚠️ 專案狀態**: 目前處於早期開發階段，API 可能會有重大變更。不建議用於生產環境。
+**Project Status**: Currently in early development (v0.1.0). 3 of 10 golden tests passing. API may have breaking changes. Not recommended for production use.

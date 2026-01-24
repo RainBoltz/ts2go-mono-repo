@@ -238,7 +238,6 @@ When modifying the codebase:
 ### Utility Scripts
 Several utility scripts exist in the root directory for testing and development:
 - `test-compile.js`: Quick compilation testing
-- `update-all-expected.js`: Update all golden test expected outputs
-- `test-*.js`: Various debugging and testing utilities
+- `test-*-debug.js`: Debug scripts for individual golden tests
 
-These are development-only scripts and should not be committed for production use.
+To update golden test expected outputs, use the `GoldenTestRunner.updateExpected()` method in `tests/helpers/golden-test.ts`.
